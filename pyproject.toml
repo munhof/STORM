@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "storm-traceable"
+version = "0.1.0a0"
+description = "Domain-neutral framework for traceable and reproducible model studies"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LGPL-3.0-or-later"
+authors = [
+    { name = "Facundo Munhó" },
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+docs = ["mkdocs>=1.6"]
+examples = [
+    "ipykernel>=6",
+    "matplotlib>=3.8",
+    "scikit-learn>=1.5",
+    "seaborn>=0.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/storm"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

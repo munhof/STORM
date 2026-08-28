@@ -1,0 +1,29 @@
+site_name: STORM
+site_description: System for Traceable Orchestration, Reuse and Modeling
+docs_dir: docs
+theme:
+  name: readthedocs
+nav:
+  - Inicio: index.md
+  - Primeros pasos: getting-started.md
+  - Arquitectura:
+      - Visión general: architecture/overview.md
+      - Diseño: architecture/design.md
+      - Análisis de extracción: architecture/initial-extraction.md
+  - API:
+      - API pública: api/public-api.md
+      - Interfaces y contratos: api/interfaces.md
+  - Guías:
+      - Estudios y corridas: guides/studies-and-runs.md
+      - Modelos compatibles: guides/models.md
+      - Métricas: guides/metrics.md
+      - Artefactos y recuperación: guides/artifacts.md
+      - Pipelines y pasos: guides/pipelines-and-steps.md
+      - Visualizaciones: guides/visualizations.md
+      - Integraciones: guides/integrations.md
+markdown_extensions:
+  - tables
+  - fenced_code
+  - toc:
+      permalink: true
+strict: true
