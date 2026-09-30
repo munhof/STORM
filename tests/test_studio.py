@@ -836,6 +836,63 @@ def test_pipeline_preview_uses_a_registered_dataset_artifact(
     assert result['stages'][1]['evaluation'][0]['value'] == [3.0, 11.0]
 
 
+def test_registered_pipeline_preview_transforms_only_a_bounded_sample(
+        client, settings, tmp_path, monkeypatch):
+    from storm.artifacts import FileArtifactStore
+    from storm_studio.models import Dataset, DatasetRevision, Project, Study
+    import storm.suite
+
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    count = 1_000
+    loaded = {
+        'inputs': [[float(index), float(index * 2)] for index in range(count * 2)],
+        'targets': [None] * (count * 2),
+        'observation_ids': [f'mouse:{index}' for index in range(count * 2)],
+        'frames': list(range(count)) + list(range(count)),
+        'sessions': ['train-mouse'] * count + ['test-mouse'] * count,
+        'segments': ['train-0'] * count + ['test-0'] * count,
+        'partitions': ['train'] * count + ['test'] * count,
+        'reserved_evaluation': [False] * (count * 2),
+        'feature_names': ['nose_x', 'nose_y'],
+    }
+    artifact = FileArtifactStore(settings.ARTIFACT_ROOT).save(
+        kind='datasets', artifact_id='large-preview-fixture', value=loaded)
+    dataset = Dataset.objects.create(name='Large pose sessions')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        artifact_ref=artifact.to_dict())
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Pose',
+                                 dataset_revision=source)
+
+    original_transform = storm.suite.transform_aligned
+    transformed_sizes = []
+
+    def record_transform_sizes(values, *args, **kwargs):
+        transformed_sizes.append(len(values))
+        return original_transform(values, *args, **kwargs)
+
+    monkeypatch.setattr(storm.suite, 'transform_aligned', record_transform_sizes)
+    response = client.post(f'/studies/{study.pk}/pipeline-preview/', {
+        'dataset_revision_id': str(source.pk),
+        'steps': '[{"type":"center"}]',
+    })
+
+    assert response.status_code == 200, response.content
+    result = response.json()
+    assert transformed_sizes == [128, 128]
+    assert result['preview'] == {
+        'source_observation_count': 2_000,
+        'training_input_count': 128,
+        'evaluation_input_count': 128,
+        'limit': 256,
+        'strategy': 'largest_contiguous_partition_block_v1',
+        'training_output_count': 128,
+        'evaluation_output_count': 128,
+    }
+    assert result['training'][0]['index'] >= 0
+    assert result['evaluation'][0]['index'] >= count
+
+
 def test_preparation_worker_materializes_a_reusable_dataset_without_a_model(
         client, settings, tmp_path):
     from storm.artifacts import ArtifactRef, FileArtifactStore

@@ -1087,6 +1087,7 @@ def preview_pipeline(request, study_id):
                                   if partition != 'train' or reserved[i]]
             if not training_indices:
                 raise ValueError('Asigná al menos una sesión a entrenamiento antes de previsualizar.')
+            source_observation_count = len(inputs)
             context_metadata = {
                 key: data[key] for key in (
                     'feature_names', 'likelihoods', 'likelihood_bodyparts', 'frames',
@@ -1122,6 +1123,33 @@ def preview_pipeline(request, study_id):
                 from math import isfinite
                 if not isfinite(float(step['factor'])):
                     raise ValueError('El factor de escala debe ser un número finito')
+        preview_metadata = None
+        if dataset_revision_id:
+            from storm_studio.preview_sampling import (
+                PIPELINE_PREVIEW_STRATEGY, PREVIEW_LIMIT,
+                sample_pipeline_preview_indices,
+            )
+
+            fitting_source_indices = set(fit_indices)
+            training_indices, evaluation_indices = sample_pipeline_preview_indices(
+                training_indices, evaluation_indices, fit_indices,
+                sessions=data.get('sessions') or ['dataset'] * len(inputs),
+                segments=data.get('segments') or ['dataset'] * len(inputs),
+                frames=data.get('frames') or list(range(len(inputs))),
+                reserved_evaluation=reserved, steps=steps, limit=PREVIEW_LIMIT)
+            if not training_indices:
+                raise ValueError(
+                    'No hay un bloque continuo de entrenamiento suficiente para previsualizar. '
+                    'Revisá las sesiones, los segmentos y las discontinuidades.')
+            fit_indices = [index for index in training_indices
+                           if index in fitting_source_indices]
+            preview_metadata = {
+                'source_observation_count': source_observation_count,
+                'training_input_count': len(training_indices),
+                'evaluation_input_count': len(evaluation_indices),
+                'limit': PREVIEW_LIMIT,
+                'strategy': PIPELINE_PREVIEW_STRATEGY,
+            }
         training_stage_trace = []
         evaluation_stage_trace = []
         training, fitted, training_indices = transform_aligned(
@@ -1164,12 +1192,17 @@ def preview_pipeline(request, study_id):
             'evaluation': stage_rows(evaluation_stage_trace[index]),
         } for index, step in enumerate(steps)]
 
-        return JsonResponse({
+        response = {
             'fit_partition': 'train',
             'training': rows(training_indices, training),
             'evaluation': rows(evaluation_indices, evaluation),
             'stages': stages,
-        })
+        }
+        if preview_metadata is not None:
+            preview_metadata['training_output_count'] = len(training)
+            preview_metadata['evaluation_output_count'] = len(evaluation)
+            response['preview'] = preview_metadata
+        return JsonResponse(response)
     except (ValueError, KeyError, TypeError, OverflowError, OSError) as error:
         return JsonResponse({'error': str(error)}, status=400)
 

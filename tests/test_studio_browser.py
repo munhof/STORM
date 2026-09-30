@@ -207,7 +207,7 @@ def test_codeless_preparation_preview_save_and_model_reuse(live_server, settings
         expect(page.locator('#preparation-steps')).to_contain_text(
             'Centrar por media del entrenamiento')
         page.get_by_role('button', name='Previsualizar sobre el dataset').click()
-        expect(page.locator('#preparation-status')).to_contain_text('Vista previa lista')
+        expect(page.locator('#preparation-status')).to_contain_text('Muestra contigua lista')
         expect(page.locator('#preparation-preview')).to_be_visible()
         expect(page.locator('#preparation-preview')).to_contain_text('[-1,-5]')
         expect(page.locator('#preparation-stage-results')).to_contain_text(
