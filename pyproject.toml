@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "storm-traceable"
+name = "storm-workspace"
 version = "0.1.0a0"
 description = "Domain-neutral framework for traceable and reproducible model studies"
 readme = "README.md"
@@ -20,10 +20,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-dependencies = []
+dependencies = ["storm-traceable", "storm-studio", "storm-studio-visual"]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-django>=4.9", "playwright>=1.50"]
 docs = ["mkdocs>=1.6"]
 examples = [
     "ipykernel>=6",
@@ -32,9 +32,18 @@ examples = [
     "seaborn>=0.13",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/storm"]
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+storm-traceable = { workspace = true }
+storm-studio = { workspace = true }
+storm-studio-visual = { workspace = true }
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
-testpaths = ["tests"]
+pythonpath = ["packages/storm-engine/src", "packages/storm-studio/src", "packages/storm-visualization/src"]
+testpaths = ["tests", "studio-visual/tests"]
+DJANGO_SETTINGS_MODULE = "storm_studio.settings"

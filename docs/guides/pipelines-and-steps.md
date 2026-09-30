@@ -1,5 +1,30 @@
 # Pipelines, contexto y preparación de datos
 
+## Alineación de observaciones
+
+Cuando un paso preserva cantidad y orden de observaciones no necesita código
+adicional. Si filtra o reordena, debe actualizar el mapeo de fuentes del
+contexto. STORM usa ese mapeo para asociar outputs, targets y evidencia con la
+observación correcta; cambiar filas sin declararlo detiene la ejecución.
+
+```python
+class KeepLast(PipelineStep):
+    step_type = "keep_last"
+
+    def process(self, context):
+        context.data = context.data[1:]
+        context.metadata["observation_indices"] = (
+            context.metadata["observation_indices"][1:]
+        )
+        return context
+```
+
+El mapeo contiene índices de observación originales, debe ser único y debe tener
+la misma longitud que `context.data`. Una transformación que agregue, fusione o
+reemplace observaciones no está soportada todavía: debe exponerse como un
+adaptador con una semántica de alineación específica, no simularse como un paso
+ordinario.
+
 > **Estado actual: implementado.** `storm.pipeline` contiene specs
 > serializables, contexto neutral, interfaz de pasos, registro por reflexión,
 > runner secuencial y composición con `DataLoader`.
@@ -244,3 +269,21 @@ fingerprint de entrada
 ```
 
 El runner nunca debe construir un store ni asumir nombres de features.
+
+## Preparación codeless en RAINSTORM Studio
+
+En un estudio, **Preparar** guarda una revisión de receta ligada a una revisión
+de datos. El editor agrega, reordena y quita pasos; permite previsualizar las
+observaciones de entrenamiento y evaluación con su ID original. El centrado
+calcula una media por coordenada usando solo entrenamiento. Si el plugin de
+RAINSTORM está activo, también aparecen selección de coordenadas, recentrado por
+punto corporal, alineación canónica a 45°, filtro de confianza y ventanas
+temporales. La orientación aplica la misma fórmula documentada por la receta
+supervisada histórica; los puntos se eligen por nombre y se resuelven contra las
+coordenadas que queden disponibles en ese punto de la pipeline.
+
+Una receta se puede ejecutar como trabajo independiente para crear otra revisión
+de dataset con su propio artefacto, fingerprint y enlace a la fuente. En
+**Configurar**, el investigador puede seleccionar ese dataset procesado, o
+aplicar una receta guardada durante la ejecución del modelo. La revisión del
+plan conserva el ID de la receta y los pasos resueltos que ejecutó el worker.

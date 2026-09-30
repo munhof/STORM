@@ -12,12 +12,18 @@ dependencias científicas externas.
 El runtime de STORM usa únicamente la biblioteca estándar de Python. `pytest`
 es una dependencia opcional de desarrollo.
 
+El repositorio completo es ahora un monorepo. La aplicación web usa Django;
+el paquete del motor continúa sin esas dependencias. Para abrir la aplicación,
+seguir la [guía de Django Studio](guides/django-suite.md).
+
 ## Instalación con `uv`
 
 Desde un checkout del repositorio:
 
 ```bash
-uv run --extra test pytest
+uv sync --extra test --extra docs
+uv run playwright install chromium
+uv run pytest
 ```
 
 Para ejecutar el ejemplo:
@@ -34,7 +40,9 @@ uv run python examples/full_core_example.py
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[test]"
+python -m pip install -e packages/storm-engine -e packages/storm-visualization -e packages/storm-studio
+python -m pip install pytest pytest-django playwright
+python -m playwright install chromium
 pytest
 python examples/basic_study.py
 python examples/pipeline_and_visualization.py

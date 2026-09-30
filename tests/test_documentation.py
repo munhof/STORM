@@ -27,6 +27,7 @@ REQUIRED_PAGES = (
     "guides/artifacts.md",
     "guides/pipelines-and-steps.md",
     "guides/visualizations.md",
+    "guides/studio-components.md",
     "guides/integrations.md",
 )
 
@@ -76,7 +77,7 @@ class DocumentationTest(unittest.TestCase):
 
     def test_basic_example_executes_without_external_dependencies(self):
         environment = os.environ.copy()
-        environment["PYTHONPATH"] = str(ROOT / "src")
+        environment["PYTHONPATH"] = str(ROOT / "packages/storm-engine/src")
 
         completed = subprocess.run(
             [sys.executable, str(ROOT / "examples/basic_study.py")],
@@ -93,7 +94,7 @@ class DocumentationTest(unittest.TestCase):
 
     def test_pipeline_and_visualization_example_executes_without_external_dependencies(self):
         environment = os.environ.copy()
-        environment["PYTHONPATH"] = str(ROOT / "src")
+        environment["PYTHONPATH"] = str(ROOT / "packages/storm-engine/src")
 
         completed = subprocess.run(
             [sys.executable, str(ROOT / "examples/pipeline_and_visualization.py")],
@@ -110,7 +111,7 @@ class DocumentationTest(unittest.TestCase):
 
     def test_full_core_example_executes_without_external_dependencies(self):
         environment = os.environ.copy()
-        environment["PYTHONPATH"] = str(ROOT / "src")
+        environment["PYTHONPATH"] = str(ROOT / "packages/storm-engine/src")
 
         completed = subprocess.run(
             [sys.executable, str(ROOT / "examples/full_core_example.py")],
@@ -124,6 +125,34 @@ class DocumentationTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("best_run=mean", completed.stdout)
         self.assertIn("visualization=image/svg+xml", completed.stdout)
+
+    def test_studio_components_guide_describes_current_storm_runtime(self):
+        guide = (DOCS / "guides/studio-components.md").read_text(encoding="utf-8")
+
+        for required in (
+            "ModelRegistry",
+            "MetricRegistry",
+            "DataLoader",
+            "ArtifactStore",
+            "PipelineDataLoader",
+            "ModelOutput",
+            "no inventa un modelo",
+            "conector",
+            "RAINSTORM",
+        ):
+            self.assertIn(required, guide)
+
+    def test_visual_study_describes_raw_data_classification_inspection(self):
+        guide = (DOCS / "design/visual-study.md").read_text(encoding="utf-8")
+
+        for required in (
+            "datos crudos",
+            "clasificación",
+            "alineación temporal",
+            "overlay",
+            "TemporalClassificationVisualization",
+        ):
+            self.assertIn(required, guide)
 
 
 if __name__ == "__main__":

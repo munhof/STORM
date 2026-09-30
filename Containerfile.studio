@@ -1,0 +1,13 @@
+FROM docker.io/library/python:3.13-slim
+
+WORKDIR /opt/storm
+COPY packages/storm-engine /opt/storm/packages/storm-engine
+COPY packages/storm-studio /opt/storm/packages/storm-studio
+RUN pip install --no-cache-dir ./packages/storm-engine ./packages/storm-studio
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    STORM_WORKSPACE=/workspace/.storm
+
+EXPOSE 8000
+CMD ["sh", "-c", "storm-studio migrate && exec storm-studio runserver 0.0.0.0:8000"]

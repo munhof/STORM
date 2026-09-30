@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title">
+  <title id="title">Mockup editable de evidencia cruda y clasificación temporal</title>
+  <g inkscape:groupmode="layer" inkscape:label="fondo" id="fondo">
+    <rect width="1440" height="900" fill="#F8FAFC"/>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="navegacion" id="navegacion">
+    <rect width="1440" height="76" fill="#FFFFFF"/>
+    <text x="28" y="47" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#0F172A">STORM Studio</text>
+    <text x="240" y="46" font-family="Arial, sans-serif" font-size="18" fill="#475569">/ Evidencia temporal</text>
+    <text x="1135" y="45" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#1D4ED8">RAINSTORM plugin</text>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="control" id="control">
+    <rect x="24" y="101" width="1392" height="74" rx="10" fill="#FFFFFF"/>
+    <text x="48" y="132" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#0F172A">demo-session-018 · intervalo 12.40–18.20 s</text>
+    <text x="48" y="157" font-family="Arial, sans-serif" font-size="14" fill="#475569">Modelo: VAME · ejecución run-042 · fuente: pose_prepared_v3</text>
+    <rect x="890" y="120" width="98" height="34" rx="8" fill="#DBEAFE"/>
+    <text x="913" y="142" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#1D4ED8">▶ Play</text>
+    <rect x="1000" y="120" width="126" height="34" rx="8" fill="#F1F5F9"/>
+    <text x="1018" y="142" font-family="Arial, sans-serif" font-size="14" fill="#0F172A">Frame 01842</text>
+    <rect x="1138" y="120" width="118" height="34" rx="8" fill="#F1F5F9"/>
+    <text x="1153" y="142" font-family="Arial, sans-serif" font-size="14" fill="#0F172A">◀ Anterior</text>
+    <rect x="1268" y="120" width="122" height="34" rx="8" fill="#F1F5F9"/>
+    <text x="1282" y="142" font-family="Arial, sans-serif" font-size="14" fill="#0F172A">Siguiente ▶</text>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="dato_crudo" id="dato_crudo">
+    <rect x="24" y="199" width="660" height="430" rx="10" fill="#FFFFFF"/>
+    <text x="48" y="238" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#0F172A">Dato crudo</text>
+    <text x="48" y="266" font-family="Arial, sans-serif" font-size="14" fill="#475569">Frame / trayectoria / señal original · origen trazable</text>
+    <rect x="48" y="288" width="612" height="294" rx="8" fill="#E0F2FE"/>
+    <rect x="126" y="359" width="420" height="150" rx="70" fill="#BAE6FD" stroke="#0369A1" stroke-width="3"/>
+    <circle cx="250" cy="412" r="13" fill="#DC2626"/>
+    <circle cx="420" cy="457" r="13" fill="#DC2626"/>
+    <path d="M250 412 C320 390, 350 460, 420 457" fill="none" stroke="#DC2626" stroke-width="4"/>
+    <text x="66" y="324" font-family="Arial, sans-serif" font-size="13" fill="#475569">subject_01 · coordenadas normalizadas · ventana sin padding</text>
+    <text x="66" y="551" font-family="Arial, sans-serif" font-size="13" fill="#475569">Muestra seleccionada: 01842 · timestamp 15.72 s</text>
+    <text x="48" y="610" font-family="Arial, sans-serif" font-size="13" fill="#475569">Preparación: pose_prepared_v3 · PipelineDataLoader · hash 8f2…</text>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="clasificacion" id="clasificacion">
+    <rect x="708" y="199" width="708" height="430" rx="10" fill="#FFFFFF"/>
+    <text x="732" y="238" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#0F172A">Clasificación alineada</text>
+    <text x="732" y="266" font-family="Arial, sans-serif" font-size="14" fill="#475569">Mismo índice temporal · seleccionar una banda para inspeccionar</text>
+    <rect x="732" y="297" width="660" height="54" rx="7" fill="#DCFCE7"/>
+    <text x="748" y="330" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">Exploración</text>
+    <rect x="732" y="359" width="660" height="54" rx="7" fill="#FEF3C7"/>
+    <text x="748" y="392" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#92400E">Interacción</text>
+    <rect x="732" y="421" width="660" height="54" rx="7" fill="#DBEAFE"/>
+    <text x="748" y="454" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1D4ED8">Etiqueta humana</text>
+    <line x1="1050" y1="286" x2="1050" y2="488" stroke="#DC2626" stroke-width="3"/>
+    <text x="1060" y="510" font-family="Arial, sans-serif" font-size="13" fill="#DC2626">01842 · Interacción · p=0.81</text>
+    <text x="732" y="558" font-family="Arial, sans-serif" font-size="13" fill="#475569">Alineación: frame ✓ · pérdidas 0 · downsampling ×1</text>
+    <text x="732" y="584" font-family="Arial, sans-serif" font-size="13" fill="#475569">Fuente predicción: ModelOutput · modelo VAME · run-042</text>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="timeline" id="timeline">
+    <rect x="24" y="653" width="1392" height="222" rx="10" fill="#FFFFFF"/>
+    <text x="48" y="690" font-family="Arial, sans-serif" font-size="21" font-weight="700" fill="#0F172A">Timeline sincronizado</text>
+    <text x="48" y="716" font-family="Arial, sans-serif" font-size="13" fill="#475569">Arrastrar el cursor actualiza frame, valores y predicción; comparar agrega otra banda.</text>
+    <line x1="90" y1="764" x2="1360" y2="764" stroke="#94A3B8" stroke-width="2"/>
+    <rect x="110" y="735" width="230" height="28" rx="6" fill="#DCFCE7"/><text x="124" y="754" font-family="Arial, sans-serif" font-size="13" fill="#166534">Exploración</text>
+    <rect x="340" y="735" width="360" height="28" rx="6" fill="#FEF3C7"/><text x="354" y="754" font-family="Arial, sans-serif" font-size="13" fill="#92400E">Interacción</text>
+    <rect x="700" y="735" width="260" height="28" rx="6" fill="#FCE7F3"/><text x="714" y="754" font-family="Arial, sans-serif" font-size="13" fill="#9D174D">Grooming</text>
+    <rect x="960" y="735" width="400" height="28" rx="6" fill="#E2E8F0"/><text x="974" y="754" font-family="Arial, sans-serif" font-size="13" fill="#475569">Sin etiqueta</text>
+    <line x1="585" y1="724" x2="585" y2="824" stroke="#DC2626" stroke-width="3"/>
+    <text x="570" y="846" font-family="Arial, sans-serif" font-size="13" fill="#DC2626">15.72 s</text>
+    <text x="90" y="803" font-family="Arial, sans-serif" font-size="13" fill="#475569">12.40 s</text>
+    <text x="1280" y="803" font-family="Arial, sans-serif" font-size="13" fill="#475569">18.20 s</text>
+    <text x="90" y="853" font-family="Arial, sans-serif" font-size="13" fill="#475569">✓ Los desacuerdos entre modelos se muestran como capa separada; no se sobrescribe la etiqueta humana.</text>
+  </g>
+</svg>

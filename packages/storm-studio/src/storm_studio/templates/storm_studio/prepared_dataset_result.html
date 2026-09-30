@@ -1,0 +1,61 @@
+<section class="card" id="prepared-dataset-result" aria-labelledby="prepared-dataset-result-title">
+  <h3 id="prepared-dataset-result-title">Resultado procesado · revisión r{{ inspected_prepared_dataset.number }}</h3>
+  <p>{{ inspected_prepared_dataset.inventory.frame_count }} observaciones · {{ inspected_prepared_dataset.inventory.feature_count }} características · conector {{ inspected_prepared_dataset.connector }}</p>
+  <p>Fuente: revisión r{{ inspected_prepared_dataset.config.source_dataset_revision_id }} · receta {{ inspected_prepared_dataset.config.preparation_revision_id }}.</p>
+  <p class="muted">Esta es una muestra de la salida persistida por el worker, después de aplicar la receta. Las transformaciones no modifican la fuente original.</p>
+  {% if inspected_prepared_dataset.inventory.preview %}
+  <div class="table-scroll">
+    <table id="prepared-dataset-preview">
+      <caption>Muestra guardada: {{ inspected_prepared_dataset.inventory.preview|length }} observaciones, distribuida entre sesiones y segmentos.</caption>
+      <thead>
+        <tr>
+          <th>Observación</th><th>Sesión</th><th>Frame</th><th>Segmento</th><th>Partición</th>
+          {% for feature in inspected_prepared_dataset.inventory.feature_names %}<th>{{ feature }}</th>{% endfor %}
+          <th>Etiqueta</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in inspected_prepared_dataset.inventory.preview %}
+        <tr>
+          <td>{{ row.observation_id }}</td><td>{{ row.session_id }}</td><td>{{ row.frame }}</td>
+          <td>{{ row.segment }}</td><td>{{ row.partition }}</td>
+          {% for value in row.features %}<td>{{ value|default_if_none:'—' }}</td>{% endfor %}
+          <td>{{ row.target|default_if_none:'—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p role="status">La revisión no tiene una muestra de filas disponible.</p>
+  {% endif %}
+  {% if inspected_prepared_dataset.inventory.preparation_stage_preview %}
+  <details id="prepared-dataset-stages" open>
+    <summary>Ver resultado de cada paso de la receta</summary>
+    <p class="muted">Muestra guardada al procesar el dataset; los conteos indican las filas que quedaron después de cada transformación.</p>
+    {% for stage in inspected_prepared_dataset.inventory.preparation_stage_preview %}
+    <article>
+      <h4>Paso {{ forloop.counter }}:
+        {% if stage.type == 'center' %}Centrar por media del entrenamiento
+        {% elif stage.type == 'scale' %}Multiplicar coordenadas
+        {% elif stage.type == 'pose.select_coordinates' %}Elegir coordenadas
+        {% elif stage.type == 'pose.recenter' %}Centrar en punto corporal
+        {% elif stage.type == 'pose.orient_coordinates' %}Alinear orientación
+        {% elif stage.type == 'pose.likelihood_filter' %}Filtrar por confianza
+        {% elif stage.type == 'pose.temporal_windows' %}Crear ventanas temporales
+        {% else %}{{ stage.type }}{% endif %}
+      </h4>
+      <p>{{ stage.training_row_count }} filas de entrenamiento · {{ stage.evaluation_row_count }} de evaluación.</p>
+      <h5>Entrenamiento</h5>
+      {% if stage.training %}<div class="table-scroll"><table><thead><tr><th>Observación</th><th>Sesión</th><th>Frame</th><th>Segmento</th><th>Reserva de evaluación</th><th>Valor tras el paso</th></tr></thead><tbody>{% for row in stage.training %}<tr><td>{{ row.observation_id }}</td><td>{{ row.session_id }}</td><td>{{ row.frame }}</td><td>{{ row.segment }}</td><td>{{ row.reserved_evaluation|yesno:'Sí,No' }}</td><td>{{ row.value }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>No quedaron filas en esta muestra.</p>{% endif %}
+      <h5>Evaluación</h5>
+      {% if stage.evaluation %}<div class="table-scroll"><table><thead><tr><th>Observación</th><th>Sesión</th><th>Frame</th><th>Segmento</th><th>Reserva de evaluación</th><th>Valor tras el paso</th></tr></thead><tbody>{% for row in stage.evaluation %}<tr><td>{{ row.observation_id }}</td><td>{{ row.session_id }}</td><td>{{ row.frame }}</td><td>{{ row.segment }}</td><td>{{ row.reserved_evaluation|yesno:'Sí,No' }}</td><td>{{ row.value }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>No quedaron filas en esta muestra.</p>{% endif %}
+    </article>
+    {% endfor %}
+  </details>
+  {% else %}
+  <p role="status">Esta revisión se procesó antes de guardar muestras por etapa. Podés cargar su receta y previsualizar cada paso.</p>
+  <a class="button" href="{% url 'page' study.pk 'prepare' %}?recipe_revision={{ inspected_prepared_dataset.config.preparation_revision_id }}#preparation-form">Cargar receta y ver los pasos</a>
+  {% endif %}
+  <a class="button" href="{% url 'page' study.pk 'flow' %}?dataset_revision_id={{ inspected_prepared_dataset.pk }}">Configurar un modelo con esta revisión</a>
+</section>

@@ -1,0 +1,724 @@
+{% if pose_motion_preview or pose_preview_store %}
+<section class="{% if section == 'prepare' %}pose-motion-embedded{% else %}card{% endif %}" aria-labelledby="pose-motion-title">
+  <h3 id="pose-motion-title">Visor de pose registrada</h3>
+  {% if pose_preview_is_balanced %}<p>Recorré una muestra representativa de hasta 256 observaciones, distribuida entre sesiones y segmentos. Los trazos se separan en cada discontinuidad del video. El desfase definido en Datos se aplica al sincronizar el pose con el video.</p>{% else %}<p>Esta revisión conserva una muestra anterior del inventario. Usá «Actualizar inventario» arriba para recalcularla y distribuirla entre sesiones y segmentos.</p>{% endif %}
+  <div class="grid" id="pose-motion-controls">
+    <div><label for="pose-preview-session">Sesión</label><select id="pose-preview-session"></select></div>
+    <fieldset><legend>Partes corporales para graficar (x/y)</legend><label><input type="checkbox" id="pose-preview-all-bodyparts" checked> Todas las partes</label><details><summary id="pose-preview-bodyparts-summary">Elegir partes</summary><div id="pose-preview-bodyparts" class="grid"></div></details></fieldset>
+    <div><label for="pose-preview-frame">Frame actual de pose</label><input id="pose-preview-frame" type="range" min="0" value="0"></div>
+  </div>
+  <div class="grid" id="pose-review-filter-controls">
+    <div><label for="pose-preview-review-filter">Buscar frames para revisar</label>
+      <select id="pose-preview-review-filter">
+        <option value="all">Todos los frames</option>
+        <option value="reference">Con etiqueta de referencia válida</option>
+        <option value="correction">Con corrección aceptada</option>
+        <option value="annotation">Con anotación de una corrida</option>
+      </select></div>
+    <div class="actions">
+      <button type="button" id="pose-review-previous">Frame anterior coincidente</button>
+      <button type="button" id="pose-review-next">Frame siguiente coincidente</button>
+    </div>
+  </div>
+  <p id="pose-review-filter-status" role="status" aria-live="polite"></p>
+  {% if pose_prediction_runs %}
+  <form id="pose-prediction-selection" method="get">
+    <fieldset><legend>Salidas de corridas alineadas</legend>
+      <p>Elegí hasta cuatro corridas para ver sus predicciones sobre el mismo frame de pose.</p>
+      {% for run in pose_prediction_runs %}
+      <label><input type="checkbox" name="predictions" value="{{ run.job_id }}"{% if run.job_id in pose_prediction_job_ids %} checked{% endif %}>
+        {{ run.model }} · {{ run.job_id|slice:':8' }} · {{ run.semantics }}</label>
+      {% endfor %}
+    </fieldset>
+    <button>Mostrar predicciones</button>
+  </form>
+  {% endif %}
+  <div class="actions"><button type="button" id="pose-preview-play">Reproducir movimiento</button></div>
+  <p id="pose-label-readout" role="status" aria-live="polite">Sin etiqueta de referencia válida</p>
+  <p id="pose-correction-readout" role="status" aria-live="polite">Sin corrección vigente</p>
+  <div id="pose-run-annotation-readout" role="status" aria-live="polite"></div>
+  <div id="pose-prediction-readout" role="status" aria-live="polite" aria-label="Predicciones de las corridas seleccionadas"></div>
+  {% if label_correction_taxonomy and pose_preview_store %}
+  <form id="pose-label-correction-form" method="post" action="{{ label_correction_url }}">
+    {% csrf_token %}
+    <input type="hidden" name="session_id" id="pose-label-session">
+    <input type="hidden" name="frame" id="pose-label-frame">
+    <input type="hidden" name="observation_id" id="pose-label-observation-id">
+    <div class="grid">
+      <div><label for="pose-label-correction">Etiqueta corregida</label>
+        <select name="label" id="pose-label-correction" required>
+          <option value="">Elegí una etiqueta</option>
+          {% for label in label_correction_taxonomy %}<option value="{{ label }}">{{ label }}</option>{% endfor %}
+        </select></div>
+      <div><label for="pose-label-author">Autor/a</label>
+        <input name="author" id="pose-label-author" maxlength="160" required></div>
+      <div><label for="pose-label-reason">Motivo de la corrección</label>
+        <input name="reason" id="pose-label-reason" maxlength="2000" required></div>
+    </div>
+    <p class="muted">La corrección crea una revisión separada. El CSV, el H5 y la etiqueta original permanecen intactos.</p>
+    <button type="submit">Guardar corrección como revisión</button>
+  </form>
+  {% endif %}
+  <div id="pose-video-preview" hidden>
+    <label for="pose-preview-video">Video de la sesión</label>
+    <video id="pose-preview-video" controls playsinline preload="metadata"></video>
+    <form id="pose-video-proxy-form" method="post" hidden>
+      {% csrf_token %}
+      <button id="pose-video-proxy-button" type="submit">Preparar copia MP4 de revisión</button>
+    </form>
+    <fieldset id="pose-video-calibration">
+      <legend>Calibrar desfase pose/video</legend>
+      <p>Elegí una muestra de pose y buscá ese mismo instante en el video. El frame del video se cuenta desde 0.</p>
+      <div class="grid">
+        <div><label for="pose-calibration-pose-frame">Frame de pose seleccionado</label><output id="pose-calibration-pose-frame">—</output></div>
+        <div><label for="pose-calibration-video-frame">Frame de video observado</label><input id="pose-calibration-video-frame" type="number" min="0" step="1" value="0"></div>
+      </div>
+      <button type="button" id="pose-calibration-apply">Calcular y cargar desfase</button>
+      <p id="pose-calibration-status" role="status" aria-live="polite"></p>
+      <small>Desfase = frame de video (base 0) − frame de pose + base del índice de pose. El cálculo completa el vínculo; guardá los vínculos para crear e inspeccionar una nueva revisión de datos.</small>
+    </fieldset>
+  </div>
+  <svg id="pose-motion" viewBox="0 0 800 500" role="img" aria-label="Trayectoria espacial del punto corporal seleccionado"></svg>
+  <p id="pose-motion-readout" role="status" aria-live="polite"></p>
+  <p id="pose-video-sync-status" role="status" aria-live="polite"></p>
+  <p id="pose-video-playback-status" role="status" aria-live="polite"></p>
+</section>
+{{ pose_motion_preview|json_script:'pose-motion-data' }}
+{{ dataset_feature_names|json_script:'pose-motion-features' }}
+{{ pose_motion_rois|json_script:'pose-motion-rois' }}
+{{ video_previews|json_script:'pose-video-data' }}
+{{ pose_preview_store|json_script:'pose-preview-store-data' }}
+{{ label_corrections|json_script:'pose-label-corrections-data' }}
+{{ pose_prediction_job_ids|json_script:'pose-prediction-job-ids' }}
+<span id="pose-preview-endpoint" hidden>{{ pose_preview_endpoint }}</span>
+<span id="pose-preview-fps" hidden>{{ pose_preview_fps }}</span>
+<span id="pose-preview-frame-base" hidden>{{ pose_preview_frame_base }}</span>
+<script>
+(() => {
+  const rows = JSON.parse(document.getElementById('pose-motion-data').textContent);
+  const featureNames = JSON.parse(document.getElementById('pose-motion-features').textContent);
+  const previewStore = JSON.parse(document.getElementById('pose-preview-store-data').textContent);
+  const previewEndpoint = document.getElementById('pose-preview-endpoint').textContent.trim();
+  const fullTimeline = Boolean(previewStore && previewEndpoint);
+  const plotFeatureNames = fullTimeline && previewStore.feature_names?.length
+    ? previewStore.feature_names : featureNames;
+  const roiData = JSON.parse(document.getElementById('pose-motion-rois').textContent);
+  const sessions = document.getElementById('pose-preview-session');
+  const bodyparts = document.getElementById('pose-preview-bodyparts');
+  const allBodyparts = document.getElementById('pose-preview-all-bodyparts');
+  const bodypartsSummary = document.getElementById('pose-preview-bodyparts-summary');
+  const frameSlider = document.getElementById('pose-preview-frame');
+  const reviewFilter = document.getElementById('pose-preview-review-filter');
+  const reviewFilterStatus = document.getElementById('pose-review-filter-status');
+  const previousReviewMatch = document.getElementById('pose-review-previous');
+  const nextReviewMatch = document.getElementById('pose-review-next');
+  const playButton = document.getElementById('pose-preview-play');
+  const readout = document.getElementById('pose-motion-readout');
+  const labelReadout = document.getElementById('pose-label-readout');
+  const correctionReadout = document.getElementById('pose-correction-readout');
+  const runAnnotationReadout = document.getElementById('pose-run-annotation-readout');
+  const correctionsPayload = JSON.parse(
+    document.getElementById('pose-label-corrections-data').textContent);
+  const corrections = correctionsPayload.corrections || {};
+  const correctionForm = document.getElementById('pose-label-correction-form');
+  const correctionSession = document.getElementById('pose-label-session');
+  const correctionFrame = document.getElementById('pose-label-frame');
+  const correctionObservation = document.getElementById('pose-label-observation-id');
+  const correctionLabel = document.getElementById('pose-label-correction');
+  const predictionReadout = document.getElementById('pose-prediction-readout');
+  const selectedPredictionJobs = JSON.parse(
+    document.getElementById('pose-prediction-job-ids').textContent);
+  if (correctionForm) {
+    correctionForm.addEventListener('submit', () => {
+      correctionForm.querySelectorAll('[data-selected-prediction]')
+        .forEach(input => input.remove());
+      document.querySelectorAll(
+        '#pose-prediction-selection input[name="predictions"]:checked')
+        .forEach(checkbox => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = 'predictions';
+          input.value = checkbox.value;
+          input.dataset.selectedPrediction = 'true';
+          correctionForm.append(input);
+        });
+    });
+  }
+  const videoSyncStatus = document.getElementById('pose-video-sync-status');
+  const videoPlaybackStatus = document.getElementById('pose-video-playback-status');
+  const svg = document.getElementById('pose-motion');
+  const videoData = JSON.parse(document.getElementById('pose-video-data').textContent);
+  const videoPreview = document.getElementById('pose-video-preview');
+  const video = document.getElementById('pose-preview-video');
+  const proxyForm = document.getElementById('pose-video-proxy-form');
+  const proxyButton = document.getElementById('pose-video-proxy-button');
+  const calibrationPoseFrame = document.getElementById('pose-calibration-pose-frame');
+  const calibrationVideoFrame = document.getElementById('pose-calibration-video-frame');
+  const calibrationApply = document.getElementById('pose-calibration-apply');
+  const calibrationStatus = document.getElementById('pose-calibration-status');
+  video.addEventListener('error', () => {
+    videoPlaybackStatus.textContent = 'El navegador no pudo reproducir este video. '
+      + 'La vista de pose sigue disponible; podés preparar una copia MP4 en segundo plano.';
+    proxyForm.hidden = false;
+  });
+  video.addEventListener('loadeddata', () => {
+    videoPlaybackStatus.textContent = '';
+  });
+  const fps = Number(document.getElementById('pose-preview-fps').textContent) || 30;
+  const poseFrameBase = Number(document.getElementById('pose-preview-frame-base').textContent) || 0;
+  const namespace = 'http://www.w3.org/2000/svg';
+  const parts = [...new Set(plotFeatureNames
+    .filter(name => name.endsWith('_x') && plotFeatureNames.includes(`${name.slice(0, -2)}_y`))
+    .map(name => name.slice(0, -2)))];
+  if ((!rows.length && !fullTimeline) || !parts.length) return;
+
+  const sessionNames = fullTimeline
+    ? previewStore.sessions.map(session => session.session_id)
+    : [...new Set(rows.map(row => row.session_id))];
+  sessionNames.forEach(session => {
+    const option = document.createElement('option');
+    option.value = session; option.textContent = session; sessions.append(option);
+  });
+  parts.forEach(part => {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.checked = true;
+    checkbox.value = part; checkbox.dataset.bodypart = part;
+    checkbox.addEventListener('change', () => {
+      const selected = [...bodyparts.querySelectorAll('input[data-bodypart]:checked')];
+      allBodyparts.checked = selected.length === parts.length;
+      allBodyparts.indeterminate = selected.length > 0 && selected.length < parts.length;
+      bodypartsSummary.textContent = `Elegir partes · ${selected.length} graficadas`;
+      render();
+    });
+    label.append(checkbox, document.createTextNode(` ${part}`));
+    bodyparts.append(label);
+  });
+  bodypartsSummary.textContent = `Elegir partes · ${parts.length} graficadas`;
+  let activeRows = [];
+  let activeSession = '';
+  let activeOffset = 0;
+  let activeRowCount = 0;
+  let activeTaxonomy = [];
+  let pageRequestNumber = 0;
+  let filterSearchNumber = 0;
+  let pendingPageKey = '';
+  const makeSvg = (tag, attributes) => {
+    const element = document.createElementNS(namespace, tag);
+    for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+    return element;
+  };
+  async function requestPage(index, {frame = null, frameField = 'frame', seekVideo = true} = {}) {
+    const sessionId = sessions.value;
+    const pageSize = Math.min(Number(previewStore.chunk_size) || 512, 512);
+    const offset = Math.floor(index / pageSize) * pageSize;
+    const key = `${sessionId}:${frameField}:${frame ?? offset}`;
+    if (pendingPageKey === key) return;
+    pendingPageKey = key;
+    const requestNumber = ++pageRequestNumber;
+    const query = new URLSearchParams({session_id: sessionId, limit: String(pageSize)});
+    if (frame === null) query.set('offset', String(offset));
+    else {
+      query.set('frame', String(frame));
+      query.set('frame_field', frameField);
+    }
+    selectedPredictionJobs.forEach(jobId => query.append('predictions', jobId));
+    readout.textContent = `Cargando frames de ${sessionId}…`;
+    try {
+      const response = await fetch(`${previewEndpoint}?${query}`, {credentials: 'same-origin'});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'No se pudo cargar esta página de pose.');
+      if (requestNumber !== pageRequestNumber || sessions.value !== sessionId) return;
+      activeRows = result.rows;
+      activeSession = sessionId;
+      activeOffset = result.offset;
+      activeRowCount = result.row_count;
+      activeTaxonomy = result.taxonomy || [];
+      if (result.selected_index !== null) frameSlider.value = String(result.selected_index);
+      render({seekVideo});
+    } catch (error) {
+      if (requestNumber === pageRequestNumber) readout.textContent = error.message;
+    } finally {
+      if (requestNumber === pageRequestNumber) pendingPageKey = '';
+    }
+  }
+  function render({seekVideo = true} = {}) {
+    const sessionInfo = fullTimeline
+      ? previewStore.sessions.find(session => session.session_id === sessions.value) : null;
+    const sessionRows = fullTimeline
+      ? (activeSession === sessions.value ? activeRows : [])
+      : rows.filter(row => row.session_id === sessions.value);
+    const rowCount = fullTimeline ? (sessionInfo?.row_count || activeRowCount) : sessionRows.length;
+    frameSlider.max = String(Math.max(0, rowCount - 1));
+    frameSlider.disabled = rowCount < 2;
+    const selectedOrdinal = Math.min(Number(frameSlider.value), Math.max(0, rowCount - 1));
+    frameSlider.value = String(selectedOrdinal);
+    const selectedIndex = fullTimeline
+      ? sessionRows.findIndex(row => row.ordinal === selectedOrdinal)
+      : selectedOrdinal;
+    if (fullTimeline && selectedIndex < 0) {
+      svg.replaceChildren();
+      labelReadout.textContent = 'Cargando etiqueta de referencia…';
+      requestPage(selectedOrdinal, {seekVideo});
+      return;
+    }
+    const selectedRow = sessionRows[selectedIndex];
+    const labelIsValid = selectedRow?.evaluation_mask === true
+      && selectedRow.target !== null && selectedRow.target !== undefined;
+    const taxonomy = fullTimeline ? activeTaxonomy : [];
+    const targetLabel = selectedRow?.target_label ??
+      (taxonomy[selectedRow?.target] ?? selectedRow?.target);
+    labelReadout.textContent = labelIsValid
+      ? `Etiqueta de referencia: ${targetLabel}`
+      : 'Sin etiqueta de referencia válida';
+    const acceptedCorrection = corrections[selectedRow?.observation_id];
+    correctionReadout.textContent = acceptedCorrection
+      ? `Corrección vigente: ${acceptedCorrection.label} · ${acceptedCorrection.author} · ${acceptedCorrection.reason}`
+      : 'Sin corrección vigente';
+    if (correctionForm) {
+      correctionSession.value = selectedRow?.session_id || '';
+      correctionFrame.value = selectedRow?.frame ?? '';
+      correctionObservation.value = selectedRow?.observation_id || '';
+      correctionLabel.value = acceptedCorrection?.label || '';
+    }
+    runAnnotationReadout.replaceChildren();
+    const runAnnotations = selectedRow?.run_annotations || [];
+    if (!runAnnotations.length) {
+      runAnnotationReadout.textContent = 'Sin anotaciones de corridas para este frame.';
+    } else {
+      for (const annotation of runAnnotations) {
+        const lane = document.createElement('p');
+        const labels = (annotation.interval_labels || [])
+          .map(label => `intervalo: ${label}`);
+        if (annotation.group_interpretation
+            && !labels.includes(annotation.group_interpretation)) {
+          labels.push(`interpretación: ${annotation.group_interpretation}`);
+        }
+        const provenance = [
+          `${annotation.model} · revisión humana ${annotation.revision_id.slice(0, 8)}`,
+          labels.join(', '), annotation.author, annotation.reason,
+        ].filter(Boolean);
+        lane.textContent = provenance.join(' · ');
+        runAnnotationReadout.append(lane);
+      }
+    }
+    predictionReadout.replaceChildren();
+    const rowPredictions = selectedRow?.model_predictions || [];
+    if (!selectedPredictionJobs.length) {
+      predictionReadout.textContent = 'Elegí corridas alineadas para mostrar sus predicciones.';
+    } else if (!rowPredictions.length) {
+      predictionReadout.textContent = 'Las corridas seleccionadas no tienen una salida para este frame.';
+    } else {
+      for (const prediction of rowPredictions) {
+        const lane = document.createElement('p');
+        const value = prediction.valid
+          ? (typeof prediction.prediction === 'object'
+            ? JSON.stringify(prediction.prediction) : String(prediction.prediction))
+          : 'ventana incompleta';
+        lane.textContent = `${prediction.model} · ${prediction.job_id.slice(0, 8)}: ${value} · ${prediction.semantics}`;
+        predictionReadout.append(lane);
+      }
+    }
+    const matchingRois = roiData.filter(roi =>
+      roi.session_id === 'global' || roi.session_id === sessions.value);
+    const frameShape = matchingRois.map(roi => roi.frame_shape)
+      .find(shape => Array.isArray(shape) && shape.length === 2
+        && shape.every(value => Number.isFinite(value) && value > 0));
+    if (frameShape) svg.setAttribute('viewBox', `0 0 ${frameShape[0]} ${frameShape[1]}`);
+    else svg.setAttribute('viewBox', '0 0 800 500');
+    const videoForSession = videoData.find(item => item.session_id === sessions.value);
+    videoPreview.hidden = !videoForSession;
+    if (!videoForSession && !video.paused) video.pause();
+    if (videoForSession) {
+      proxyForm.action = videoForSession.prepare_url;
+      const proxyPending = ['pending', 'running'].includes(videoForSession.preview_status);
+      const browserMayPlay = video.canPlayType(videoForSession.content_type || '');
+      proxyForm.hidden = videoForSession.preview_available
+        || (Boolean(browserMayPlay) && !proxyPending
+          && videoForSession.preview_status !== 'failed');
+      proxyButton.disabled = proxyPending;
+      proxyButton.textContent = proxyPending ? 'Preparando copia MP4…'
+        : videoForSession.preview_status === 'failed'
+          ? 'Reintentar copia MP4' : 'Preparar copia MP4 de revisión';
+      if (proxyPending) {
+        videoPlaybackStatus.textContent = 'Se está preparando una copia compatible en segundo plano.';
+      } else if (videoForSession.preview_available) {
+        videoPlaybackStatus.textContent = 'Vista compatible lista; se conserva el video original.';
+      } else if (videoForSession.preview_status === 'failed') {
+        videoPlaybackStatus.textContent = 'Falló la copia compatible. Podés volver a intentarlo.';
+      } else if (!browserMayPlay && !videoForSession.preview_available) {
+        videoPlaybackStatus.textContent = 'El navegador no informa compatibilidad con este formato. '
+          + 'Podés preparar una copia MP4 en segundo plano.';
+      }
+      if (video.dataset.source !== videoForSession.url) {
+        video.dataset.source = videoForSession.url;
+        video.src = videoForSession.url;
+        video.load();
+      }
+      const frameOffset = Number(videoForSession.frame_offset) || 0;
+      const signedOffset = frameOffset > 0 ? `+${frameOffset}` : String(frameOffset);
+      videoSyncStatus.textContent = `Desfase pose → video: ${signedOffset} frames.`;
+      const selectedRow = sessionRows[selectedIndex];
+      const videoFrame = selectedRow?.video_frame !== null
+        && selectedRow?.video_frame !== undefined
+        ? Number(selectedRow.video_frame)
+        : Number(selectedRow?.frame) - poseFrameBase + frameOffset;
+      const seek = () => {
+        if (!Number.isFinite(videoFrame) || videoFrame < 0 ||
+            (Number.isFinite(video.duration) && videoFrame / fps > video.duration)) {
+          videoSyncStatus.textContent += ` El frame de video ${videoFrame} queda fuera del video.`;
+          return;
+        }
+        const seconds = videoFrame / fps;
+        calibrationVideoFrame.value = String(Math.round(videoFrame));
+        if (Math.abs(video.currentTime - seconds) > 0.25 / fps) video.currentTime = seconds;
+      };
+      if (seekVideo) {
+        if (video.readyState >= 1) seek();
+        else video.onloadedmetadata = seek;
+      }
+    } else {
+      videoSyncStatus.textContent = '';
+    }
+    calibrationPoseFrame.textContent = sessionRows[selectedIndex]?.frame ?? '—';
+    const selectedParts = [...bodyparts.querySelectorAll('input[data-bodypart]:checked')]
+      .map(input => input.dataset.bodypart);
+    const tracks = selectedParts.map(part => {
+      const xIndex = plotFeatureNames.indexOf(`${part}_x`);
+      const yIndex = plotFeatureNames.indexOf(`${part}_y`);
+      const points = sessionRows.map(row => ({
+        row, x: row.features[xIndex], y: row.features[yIndex],
+      }));
+      return {part, points};
+    });
+    const visible = tracks.flatMap(track =>
+      track.points.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y)));
+    svg.replaceChildren();
+    let roiShapeCount = 0;
+    const addRoiTitle = (element, name) => {
+      const title = makeSvg('title', {});
+      title.textContent = name;
+      element.append(title);
+    };
+    for (const roi of matchingRois) {
+      if (!frameShape) break;
+      for (const rectangle of roi.rectangles || []) {
+        const [cx, cy] = rectangle.center;
+        const shape = makeSvg('rect', {
+          class: 'roi-shape roi-rectangle', 'data-roi-name': rectangle.name,
+          x: cx - rectangle.width / 2, y: cy - rectangle.height / 2,
+          width: rectangle.width, height: rectangle.height,
+          fill: '#e49a24', 'fill-opacity': '.10', stroke: '#a45300',
+          'stroke-width': '4',
+        });
+        if (rectangle.angle) shape.setAttribute(
+          'transform', `rotate(${rectangle.angle} ${cx} ${cy})`);
+        addRoiTitle(shape, `ROI ${rectangle.name} · rectángulo`);
+        svg.append(shape);
+        roiShapeCount += 1;
+      }
+      for (const circle of roi.circles || []) {
+        const shape = makeSvg('circle', {
+          class: 'roi-shape roi-circle', 'data-roi-name': circle.name,
+          cx: circle.center[0], cy: circle.center[1], r: circle.radius,
+          fill: '#e49a24', 'fill-opacity': '.10', stroke: '#a45300',
+          'stroke-width': '4',
+        });
+        addRoiTitle(shape, `ROI ${circle.name} · círculo`);
+        svg.append(shape);
+        roiShapeCount += 1;
+      }
+      for (const point of roi.points || []) {
+        const shape = makeSvg('circle', {
+          class: 'roi-shape roi-point', 'data-roi-name': point.name,
+          cx: point.center[0], cy: point.center[1], r: '8',
+          fill: '#e49a24', stroke: '#a45300', 'stroke-width': '3',
+        });
+        addRoiTitle(shape, `ROI ${point.name} · punto`);
+        svg.append(shape);
+        roiShapeCount += 1;
+      }
+    }
+    const roiNote = matchingRois.length && !frameShape
+      ? ' · ROI sin frame_shape; no se superponen' :
+      roiShapeCount ? ` · ${roiShapeCount} ROI superpuestos` : '';
+    if (!selectedParts.length) {
+      readout.textContent = `Elegí al menos una parte corporal para graficar.${roiNote}`;
+      return;
+    }
+    if (!visible.length) {
+      readout.textContent = `${sessions.value}: no hay coordenadas visibles para ${selectedParts.join(', ')}.${roiNote}`;
+      return;
+    }
+    const minX = Math.min(...visible.map(point => point.x));
+    const maxX = Math.max(...visible.map(point => point.x));
+    const minY = Math.min(...visible.map(point => point.y));
+    const maxY = Math.max(...visible.map(point => point.y));
+    const project = point => frameShape ? ({x: point.x, y: point.y}) : ({
+        x: 40 + (point.x - minX) * 720 / (maxX - minX || 1),
+        y: 40 + (maxY - point.y) * 420 / (maxY - minY || 1),
+      });
+    const colors = ['#1754ad', '#7b3fb5', '#16806a', '#bd6400', '#a32929', '#3155d9', '#9b4e8c'];
+    tracks.forEach((track, trackIndex) => {
+      const bySegment = new Map();
+      for (const point of track.points) {
+        if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+        const key = point.row.segment || 'segmento';
+        if (!bySegment.has(key)) bySegment.set(key, []);
+        bySegment.get(key).push(point);
+      }
+      for (const [segment, segmentPoints] of bySegment) {
+        svg.append(makeSvg('polyline', {
+          class: 'pose-trajectory', 'data-bodypart': track.part, 'data-segment': segment,
+          points: segmentPoints.map(point => {
+            const projected = project(point);
+            return `${projected.x},${projected.y}`;
+          }).join(' '),
+          fill: 'none', stroke: colors[trackIndex % colors.length], 'stroke-width': '3',
+          'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+        }));
+      }
+      for (const point of track.points) {
+        if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+        const projected = project(point);
+        svg.append(makeSvg('circle', {
+          class: 'pose-position', 'data-bodypart': track.part,
+          cx: projected.x, cy: projected.y, r: '4',
+          fill: colors[trackIndex % colors.length], 'fill-opacity': '.55',
+        }));
+      }
+    });
+    const currentReadouts = [];
+    for (const track of tracks) {
+      const current = track.points[selectedIndex];
+      if (!current || !Number.isFinite(current.x) || !Number.isFinite(current.y)) continue;
+      const projected = project(current);
+      const marker = makeSvg('circle', {
+        class: 'pose-motion-current', 'data-current-bodypart': track.part,
+        cx: projected.x, cy: projected.y, r: '8',
+        fill: '#bd3478', stroke: 'white', 'stroke-width': '3',
+      });
+      const title = makeSvg('title', {});
+      title.textContent = `${track.part}: (${current.x}, ${current.y})`;
+      marker.append(title);
+      svg.append(marker);
+      currentReadouts.push(`${track.part}: (${current.x}, ${current.y})`);
+    }
+    const currentRow = sessionRows[selectedIndex];
+    readout.textContent = `${sessions.value} · frame ${currentRow?.frame ?? '—'} · ${currentReadouts.join(' · ') || 'sin coordenadas visibles'}${roiNote}`;
+  }
+  function matchesReviewFilter(row) {
+    if (reviewFilter.value === 'reference') {
+      return row.evaluation_mask === true
+        && row.target !== null && row.target !== undefined;
+    }
+    if (reviewFilter.value === 'correction') {
+      return Boolean(corrections[row.observation_id]);
+    }
+    if (reviewFilter.value === 'annotation') {
+      return Boolean(row.run_annotations?.length);
+    }
+    return false;
+  }
+  function cancelReviewSearch() {
+    filterSearchNumber += 1;
+    previousReviewMatch.disabled = false;
+    nextReviewMatch.disabled = false;
+  }
+  async function moveToReviewMatch(direction) {
+    if (reviewFilter.value === 'all') {
+      reviewFilterStatus.textContent = 'Elegí un filtro para buscar frames coincidentes.';
+      return;
+    }
+    const sessionId = sessions.value;
+    const current = Number(frameSlider.value);
+    const filterName = reviewFilter.selectedOptions[0]?.textContent || 'filtro';
+    const buttons = [previousReviewMatch, nextReviewMatch];
+    buttons.forEach(button => { button.disabled = true; });
+    reviewFilterStatus.textContent = `Buscando ${filterName.toLowerCase()}…`;
+    const searchNumber = ++filterSearchNumber;
+    pageRequestNumber += 1;
+    pendingPageKey = '';
+    try {
+      if (!fullTimeline) {
+        const sessionRows = rows.filter(row => row.session_id === sessionId);
+        const candidate = sessionRows.map((row, index) => ({row, index}))
+          .filter(item => matchesReviewFilter(item.row)
+            && (direction > 0 ? item.index > current : item.index < current))
+          .sort((a, b) => direction > 0 ? a.index - b.index : b.index - a.index)[0];
+        if (candidate && searchNumber === filterSearchNumber) {
+          frameSlider.value = String(candidate.index);
+          render();
+          reviewFilterStatus.textContent = `Frame ${candidate.row.frame} coincide con ${filterName.toLowerCase()}.`;
+        } else if (searchNumber === filterSearchNumber) {
+          reviewFilterStatus.textContent = `No hay otro frame con ${filterName.toLowerCase()} en esta muestra.`;
+        }
+        return;
+      }
+      const sessionInfo = previewStore.sessions.find(item => item.session_id === sessionId);
+      const rowCount = sessionInfo?.row_count || 0;
+      const pageSize = Math.min(Number(previewStore.chunk_size) || 512, 512);
+      const pageCount = Math.ceil(rowCount / pageSize);
+      const startPage = Math.floor(current / pageSize);
+      for (let step = 0; step < pageCount; step += 1) {
+        const pageIndex = startPage + step * direction;
+        if (pageIndex < 0 || pageIndex >= pageCount) break;
+        const query = new URLSearchParams({
+          session_id: sessionId, offset: String(pageIndex * pageSize),
+          limit: String(pageSize),
+        });
+        selectedPredictionJobs.forEach(jobId => query.append('predictions', jobId));
+        const response = await fetch(`${previewEndpoint}?${query}`, {
+          credentials: 'same-origin',
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'No se pudo buscar en el timeline.');
+        if (searchNumber !== filterSearchNumber || sessions.value !== sessionId) return;
+        const candidate = result.rows
+          .filter(row => matchesReviewFilter(row)
+            && (direction > 0 ? row.ordinal > current : row.ordinal < current))
+          .sort((a, b) => direction > 0 ? a.ordinal - b.ordinal : b.ordinal - a.ordinal)[0];
+        if (!candidate) continue;
+        activeRows = result.rows;
+        activeSession = sessionId;
+        activeOffset = result.offset;
+        activeRowCount = result.row_count;
+        activeTaxonomy = result.taxonomy || [];
+        frameSlider.value = String(candidate.ordinal);
+        render();
+        reviewFilterStatus.textContent = `Frame ${candidate.frame} coincide con ${filterName.toLowerCase()}.`;
+        return;
+      }
+      if (searchNumber === filterSearchNumber) {
+        reviewFilterStatus.textContent = `No hay otro frame con ${filterName.toLowerCase()} en esta dirección.`;
+      }
+    } catch (error) {
+      if (searchNumber === filterSearchNumber) reviewFilterStatus.textContent = error.message;
+    } finally {
+      if (searchNumber === filterSearchNumber) {
+        buttons.forEach(button => { button.disabled = false; });
+      }
+    }
+  }
+  sessions.addEventListener('change', () => {
+    cancelReviewSearch();
+    reviewFilterStatus.textContent = '';
+    if (fullTimeline) {
+      activeRows = [];
+      activeSession = '';
+      frameSlider.value = '0';
+    }
+    render();
+  });
+  allBodyparts.addEventListener('change', () => {
+    bodyparts.querySelectorAll('input[data-bodypart]').forEach(input => {
+      input.checked = allBodyparts.checked;
+    });
+    allBodyparts.indeterminate = false;
+    bodypartsSummary.textContent = `Elegir partes · ${allBodyparts.checked
+      ? parts.length : 0} graficadas`;
+    render();
+  });
+  frameSlider.addEventListener('input', () => {
+    cancelReviewSearch();
+    reviewFilterStatus.textContent = '';
+    render();
+  });
+  reviewFilter.addEventListener('change', () => {
+    cancelReviewSearch();
+    reviewFilterStatus.textContent = '';
+  });
+  previousReviewMatch.addEventListener('click', () => moveToReviewMatch(-1));
+  nextReviewMatch.addEventListener('click', () => moveToReviewMatch(1));
+  function syncPoseFromVideo() {
+    if (video.seeking || !Number.isFinite(video.currentTime)) return;
+    const sessionRows = fullTimeline
+      ? (activeSession === sessions.value ? activeRows : [])
+      : rows.filter(row => row.session_id === sessions.value);
+    const videoForSession = videoData.find(item => item.session_id === sessions.value);
+    const videoFrame = Math.round(video.currentTime * fps);
+    calibrationVideoFrame.value = String(Math.max(0, videoFrame));
+    const poseFrame = video.currentTime * fps + poseFrameBase -
+      (Number(videoForSession?.frame_offset) || 0);
+    const frameField = sessionRows.some(row => row.video_frame !== null
+      && row.video_frame !== undefined && Number.isFinite(Number(row.video_frame)))
+      ? 'video_frame' : 'frame';
+    const frame = frameField === 'video_frame' ? video.currentTime * fps : poseFrame;
+    if (fullTimeline) {
+      const loadedFrames = sessionRows.map(row => Number(row[frameField])).filter(Number.isFinite);
+      const targetFrame = Math.round(frame);
+      const outsidePage = !loadedFrames.length || targetFrame < Math.min(...loadedFrames)
+        || targetFrame > Math.max(...loadedFrames);
+      if (outsidePage) {
+        if (!pendingPageKey) requestPage(0, {
+          frame: targetFrame, frameField, seekVideo: false,
+        });
+        return;
+      }
+    } else if (!sessionRows.length) return;
+    const nearestIndex = sessionRows.reduce((best, row, index) =>
+      Math.abs(Number(row[frameField]) - frame)
+        < Math.abs(Number(sessionRows[best][frameField]) - frame)
+        ? index : best, 0);
+    const sliderIndex = fullTimeline ? sessionRows[nearestIndex].ordinal : nearestIndex;
+    if (sliderIndex !== Number(frameSlider.value)) {
+      frameSlider.value = String(sliderIndex);
+      render({seekVideo: false});
+    }
+  }
+  video.addEventListener('timeupdate', () => {
+    if (video.paused) return;
+    syncPoseFromVideo();
+  });
+  video.addEventListener('seeked', syncPoseFromVideo);
+  calibrationVideoFrame.addEventListener('change', () => {
+    const frame = Number(calibrationVideoFrame.value);
+    if (!Number.isInteger(frame) || frame < 0) return;
+    video.currentTime = frame / fps;
+  });
+  calibrationApply.addEventListener('click', () => {
+    const sessionRows = fullTimeline
+      ? (activeSession === sessions.value ? activeRows : [])
+      : rows.filter(row => row.session_id === sessions.value);
+    const selectedIndex = fullTimeline
+      ? sessionRows.findIndex(row => row.ordinal === Number(frameSlider.value))
+      : Number(frameSlider.value);
+    const selected = sessionRows[selectedIndex];
+    const videoForSession = videoData.find(item => item.session_id === sessions.value);
+    const videoFrame = Number(calibrationVideoFrame.value);
+    if (!selected || !videoForSession || !Number.isInteger(videoFrame) || videoFrame < 0) {
+      calibrationStatus.textContent = 'Elegí un frame de pose y un frame válido del video.';
+      return;
+    }
+    const offset = videoFrame - Number(selected.frame) + poseFrameBase;
+    const offsetField = document.getElementById(
+      `id_asset_video_frame_offset_${videoForSession.asset_id}`);
+    if (!offsetField) {
+      calibrationStatus.textContent = 'No se encontró el campo de desfase para esta fuente.';
+      return;
+    }
+    offsetField.value = String(offset);
+    offsetField.dispatchEvent(new Event('input', {bubbles: true}));
+    offsetField.dispatchEvent(new Event('change', {bubbles: true}));
+    calibrationStatus.textContent = `Desfase calculado: ${offset} frames para ${videoForSession.name}. Guardar vínculos como revisión de datos para aplicarlo.`;
+  });
+  let playback = null;
+  playButton.addEventListener('click', () => {
+    if (playback) {
+      clearInterval(playback); playback = null; playButton.textContent = 'Reproducir movimiento';
+      return;
+    }
+    playButton.textContent = 'Pausar movimiento';
+    playback = setInterval(() => {
+      const next = Number(frameSlider.value) + 1;
+      if (next > Number(frameSlider.max)) {
+        clearInterval(playback); playback = null; frameSlider.value = '0';
+        playButton.textContent = 'Reproducir movimiento';
+      } else frameSlider.value = String(next);
+      render();
+    }, 250);
+  });
+  render();
+})();
+</script>
+{% endif %}

@@ -175,7 +175,7 @@ class MinimalStudyTest(unittest.TestCase):
                 artifacts.resolve(kind="models", artifact_id="safe-id")
 
     def test_import_has_no_scientific_or_rainstorm_dependencies(self):
-        source_root = Path(__file__).resolve().parents[1] / "src"
+        source_root = Path(__file__).resolve().parents[1] / "packages/storm-engine/src"
         code = (
             "import sys, storm; "
             "forbidden={'rainstorm','numpy','pandas','sklearn','torch','tqdm'}; "

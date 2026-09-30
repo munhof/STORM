@@ -1,0 +1,686 @@
+{% extends 'storm_studio/base.html' %}{% block content %}
+<style>.table-scroll{max-width:100%;overflow-x:auto}.pipeline-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:0;list-style-position:inside}.pipeline-overview li{padding:14px;border:1px solid #d6e1eb;border-radius:10px;background:#f8fafd}.pipeline-overview strong,.pipeline-overview small{display:block}.model-config-object{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.model-config-object legend{grid-column:1/-1}.job-progress{margin:12px 0;padding:12px 16px;border-left:4px solid #1754ad;background:#f4f8ff;border-radius:6px}.job-progress progress{display:block;width:100%;height:16px;margin:8px 0}.pose-motion-embedded{margin:8px 0 0;padding:0;border:0}#pose-motion{display:block;width:100%;height:auto;max-height:500px;border:1px solid #d6e1eb;border-radius:10px;background:#f8fafd}#pose-preview-video{display:block;width:min(100%,800px);max-height:480px;background:#111;border-radius:10px}.lineage{list-style:none;padding-left:24px;border-left:2px solid #b9c9db}.lineage>li{position:relative;padding-left:6px}.lineage>li:before{content:'';position:absolute;left:-31px;top:28px;width:12px;height:12px;border-radius:50%;background:#1754ad}.muted,code{overflow-wrap:anywhere;word-break:break-word}@media(max-width:800px){header{min-width:0;flex-wrap:wrap}header>div{min-width:0;width:0;flex:1 1 0;max-width:55vw;overflow-wrap:anywhere}header small{max-width:100%;overflow-wrap:anywhere}.app-shell,main{min-width:0}.card{padding:16px}.pipeline-overview{grid-template-columns:1fr}table{display:block;width:100%;max-width:100%;overflow-x:auto;table-layout:fixed}td,th{white-space:normal;overflow-wrap:anywhere}button,.button{min-height:42px}}</style>
+<p class="muted">{{ study.project.name }} / Estudio {{ study.pk }}</p><h1>{{ study.name }}</h1>
+<section class="card" aria-label="Resumen del estudio"><h2>Estado del estudio</h2><div class="grid"><div><strong>Próxima acción</strong><p>{{ next_action }}</p></div><div><strong>Dataset activo</strong><p>{{ dataset_summary.connector }} · {{ dataset_summary.rows }} filas</p><small class="muted">Fingerprint: {{ dataset_summary.fingerprint }}</small></div><div><strong>Ejecuciones</strong><p>{{ completed|length }} completadas · {{ jobs|length }} totales</p>{% if selected %}<small>Evidencia disponible</small>{% endif %}</div><div><strong>Decisión</strong><p>{% if study.adopted_id %}Modelo adoptado{% else %}Sin modelo adoptado{% endif %} · {{ reviews|length }} revisiones</p></div></div></section>
+<h2>{{ title }}</h2>
+<details><summary>Guardar estado visual</summary><form id="snapshot-form" method="post" action="{% url 'snapshot' study.pk %}">{% csrf_token %}<input type="hidden" name="section" value="{{ section }}"><input type="hidden" name="state" id="snapshot-state" value="{{ visual_state_json|escape }}"><label>Nombre del estado <input name="name" required></label><button>Guardar snapshot</button></form></details>{% if restored_snapshot %}<p class="pill">Estado visual restaurado desde snapshot {{ restored_snapshot.pk }}. No se ejecutó ni adoptó ningún modelo.</p>{% endif %}
+{{ visual_state|json_script:'restored-visual-state' }}
+{% if section == 'data' %}
+<section class="card"><h3>Registrar fuentes del estudio</h3><p>Pose, ROIs, videos y anotaciones quedan guardados como datos versionados. Esta carga no crea ni modifica un modelo.</p><form method="post" enctype="multipart/form-data" action="{% url 'upload-data' study.pk %}">{% csrf_token %}
+{% if upload_form.non_field_errors %}<div role="alert">{{ upload_form.non_field_errors }}</div>{% endif %}
+<div class="grid"><div><label for="{{ upload_form.pose_adapter.id_for_label }}">Adapter de pose</label>{{ upload_form.pose_adapter }}{{ upload_form.pose_adapter.errors }}</div><div><label for="{{ upload_form.fps.id_for_label }}">FPS del video</label>{{ upload_form.fps }}{{ upload_form.fps.errors }}</div><div><label for="{{ upload_form.hdf_key.id_for_label }}">Clave HDF5 (opcional)</label>{{ upload_form.hdf_key }}{{ upload_form.hdf_key.errors }}</div><div>{{ upload_form.csv_frame_base.label_tag }}{{ upload_form.csv_frame_base }}{{ upload_form.csv_frame_base.errors }}<small>{{ upload_form.csv_frame_base.help_text }}</small></div><div>{{ upload_form.pose_frame_base.label_tag }}{{ upload_form.pose_frame_base }}{{ upload_form.pose_frame_base.errors }}<small>{{ upload_form.pose_frame_base.help_text }}</small></div><div>{{ upload_form.label_frame_reference.label_tag }}{{ upload_form.label_frame_reference }}{{ upload_form.label_frame_reference.errors }}</div></div>
+<div class="grid"><div><label for="{{ upload_form.pose_files.id_for_label }}">Pose · H5 o CSV</label>{{ upload_form.pose_files }}{{ upload_form.pose_files.errors }}<small class="muted">Podés seleccionar varios archivos; el nombre del archivo se usa como ID inicial de sesión.</small></div><div><label for="{{ upload_form.roi_files.id_for_label }}">ROIs · JSON</label>{{ upload_form.roi_files }}{{ upload_form.roi_files.errors }}</div><div><label for="{{ upload_form.video_files.id_for_label }}">Videos · MP4, AVI, MOV, MKV o WEBM</label>{{ upload_form.video_files }}{{ upload_form.video_files.errors }}</div><div><label for="{{ upload_form.label_files.id_for_label }}">Anotaciones · CSV, TSV o JSON</label>{{ upload_form.label_files }}{{ upload_form.label_files.errors }}</div></div>
+<button>Registrar fuentes</button></form></section>
+{% if dataset_revision %}<section class="card"><h3>Fuentes registradas · revisión {{ dataset_revision.number }}</h3><p>Adapter {{ dataset_revision.connector }} · {{ dataset_revision.inventory.assets }} archivos · {{ dataset_revision.inventory.bytes }} bytes · estado <strong>{{ dataset_revision.status }}</strong></p><p>El worker inspecciona las columnas, frames, sesiones, discontinuidades, etiquetas alineables y ROIs. Los videos y demás archivos conservan sus hashes.</p>{% if asset_session_form %}<form id="asset-session-form" method="post" action="{% url 'save-asset-sessions' study.pk %}">{% csrf_token %}<h4>Vincular fuentes a sesiones</h4><p>Revisá qué video, ROI y anotación corresponde a cada sesión de pose. Guardar los vínculos crea una revisión nueva de datos y conserva las anteriores.</p>{{ asset_session_form.non_field_errors }}<div class="table-scroll"><table><thead><tr><th>Tipo</th><th>Archivo</th><th>Sesión de pose</th><th>Tamaño</th><th>SHA-256</th></tr></thead><tbody>{% for row in asset_session_rows %}<tr><td>{{ row.asset.get_role_display }}</td><td>{{ row.asset.original_name }}</td><td>{% if row.field %}{{ row.field.label_tag }}{{ row.field }}{{ row.field.errors }}{% else %}{{ row.session_id|default:'Sin ID' }}{% endif %}{% if row.video_frame_offset_field %}<div>{{ row.video_frame_offset_field.label_tag }} {{ row.video_frame_offset_field }} {{ row.video_frame_offset_field.errors }}<small>{{ row.video_frame_offset_field.help_text }}</small></div>{% endif %}</td><td>{{ row.asset.size_bytes }}</td><td><code>{{ row.asset.sha256 }}</code></td></tr>{% endfor %}</tbody></table></div><button>Guardar vínculos como revisión de datos</button></form>{% else %}<div class="table-scroll"><table><thead><tr><th>Tipo</th><th>Archivo</th><th>Sesión</th><th>Tamaño</th><th>SHA-256</th></tr></thead><tbody>{% for asset in dataset_assets %}<tr><td>{{ asset.get_role_display }}</td><td>{{ asset.original_name }}</td><td>{{ asset.session_id|default:'Global' }}</td><td>{{ asset.size_bytes }}</td><td><code>{{ asset.sha256 }}</code></td></tr>{% endfor %}</tbody></table></div>{% endif %}{% if dataset_revision.status != 'queued' and dataset_revision.status != 'inspecting' %}<form method="post" action="{% url 'inventory-data' study.pk %}">{% csrf_token %}<button>{% if dataset_revision.status == 'ready' %}Actualizar inventario{% else %}Inspeccionar contenido{% endif %}</button></form>{% endif %}{% if dataset_revision.inventory.error %}<p role="alert">{{ dataset_revision.inventory.error }}</p>{% endif %}
+{% if dataset_revision.status == 'ready' %}<h4>Inventario científico</h4><p>{{ dataset_revision.inventory.frame_count }} frames · {{ dataset_revision.inventory.feature_count }} coordenadas · {{ dataset_revision.inventory.session_count }} sesiones · {{ dataset_revision.inventory.segment_count }} segmentos · {{ dataset_revision.inventory.labeled_frames }} frames con etiqueta válida · {{ dataset_revision.inventory.reserved_frames|default:0 }} frames reservados para evaluación · {{ dataset_revision.inventory.missing_values }} valores faltantes</p><p><strong>Características:</strong> {{ dataset_revision.inventory.feature_names|join:', ' }}</p><p><strong>Sesiones:</strong> {% for session in dataset_revision.inventory.sessions %}{{ session.session_id }} ({{ session.frames }} frames, {{ session.segments }} segmentos){% if not forloop.last %}; {% endif %}{% endfor %}</p>{% for warning in dataset_revision.inventory.warnings %}<p class="pill">{{ warning }}</p>{% endfor %}{% if dataset_revision.inventory.roi %}<p><strong>ROI:</strong> {% for roi in dataset_revision.inventory.roi %}{{ roi.file }} · {{ roi.items }} elementos ({{ roi.top_level_type }}){% if not forloop.last %}; {% endif %}{% endfor %}</p>{% endif %}{% if session_partition_rows %}<form method="post" action="{% url 'save-session-partitions' study.pk %}">{% csrf_token %}<h4>Particiones por sesión</h4><p>Cada sesión completa pertenece a una sola partición. También podés reservar un intervalo de frames como evaluación: se usa la convención [desde, hasta), donde el inicio se incluye y el fin se excluye. Esos frames y sus ventanas no entran en entrenamiento. VAME oficial requiere sesiones completas: para ese adapter, asigná la sesión entera a evaluación en vez de reservar un intervalo parcial.</p><div class="table-scroll"><table><thead><tr><th>Sesión</th><th>Frames</th><th>Segmentos</th><th>Uso</th><th>Reservar desde</th><th>Hasta (excluido)</th></tr></thead><tbody>{% for row in session_partition_rows %}<tr><td>{{ row.session_id }}</td><td>{{ row.frames }}</td><td>{{ row.segments }}</td><td>{{ row.field }}</td><td>{{ row.reserved_start }}</td><td>{{ row.reserved_stop }}</td></tr>{% endfor %}</tbody></table></div>{{ session_partition_form.non_field_errors }}<button>Guardar particiones</button></form>{% endif %}<div class="table-scroll"><table><caption>{% if pose_preview_is_balanced %}Vista previa alineada por sesión y frame; hasta 256 observaciones representativas.{% else %}Muestra anterior del inventario; actualizá el inventario para distribuirla por sesión y segmento.{% endif %}</caption><thead><tr><th>Observación</th><th>Sesión</th><th>Frame pose</th><th>Frame video</th><th>Segmento</th><th>Partición</th><th>Reserva de evaluación</th>{% for feature in dataset_revision.inventory.feature_names %}<th>{{ feature }}</th>{% endfor %}<th>Etiqueta</th></tr></thead><tbody>{% for row in dataset_revision.inventory.preview %}<tr><td>{{ row.observation_id }}</td><td>{{ row.session_id }}</td><td>{{ row.frame }}</td><td>{{ row.video_frame|default_if_none:'—' }}</td><td>{{ row.segment }}</td><td>{{ row.partition }}</td><td>{{ row.reserved_evaluation|yesno:'Sí,No' }}</td>{% for value in row.features %}<td>{{ value|default_if_none:'—' }}</td>{% endfor %}<td>{{ row.target|default_if_none:'—' }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>{% else %}<section class="card"><h3>Inventario de fuentes</h3><p>Todavía no hay archivos registrados.</p></section>{% endif %}
+{% include 'storm_studio/video_timeline.html' %}
+{% include 'storm_studio/pose_motion_preview.html' %}
+{% if derived_dataset_revisions %}<section class="card"><h3>Datasets procesados</h3><p>Cada salida queda como una revisión independiente y puede seleccionarse en el flujo del modelo.</p><div class="table-scroll"><table><thead><tr><th>Revisión</th><th>Observaciones</th><th>Características</th><th>Origen</th><th>Receta</th><th>Acción</th></tr></thead><tbody>{% for item in derived_dataset_revisions %}<tr><td>r{{ item.number }}</td><td>{{ item.inventory.frame_count }}</td><td>{{ item.inventory.feature_names|join:', ' }}</td><td>Dataset r{{ item.config.source_dataset_revision_id }}</td><td>Receta {{ item.config.preparation_revision_id }}</td><td><a href="{% url 'page' study.pk 'data' %}?prepared_revision={{ item.pk }}#prepared-dataset-result">Ver resultado</a> · <a href="{% url 'page' study.pk 'flow' %}?dataset_revision_id={{ item.pk }}">Configurar modelo</a></td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
+{% if latest %}<details class="card"><summary>Vista previa de datos vinculados a un plan existente</summary><p>{{ dataset_summary.rows }} filas · {{ dataset_missing }} faltantes · conector {{ dataset_summary.connector }}</p><p><strong>Fingerprint:</strong> <code>{{ dataset_summary.fingerprint }}</code></p>{% if dataset_fields %}<div class="table-scroll"><table><thead><tr><th>ID de observación</th>{% for field in dataset_fields %}<th>{{ field }}</th>{% endfor %}<th>Etiqueta</th><th>Partición</th></tr></thead><tbody>{% for row in dataset_preview %}<tr><td>{{ row.index }}</td>{% for value in row.values %}<td>{{ value|default_if_none:'—' }}</td>{% endfor %}<td>{{ row.target|default_if_none:'—' }}</td><td>{{ row.partition }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}</details>{% endif %}
+{% if inspected_prepared_dataset %}{% include 'storm_studio/prepared_dataset_result.html' %}{% endif %}
+{% elif section == 'prepare' %}
+{% if required_pipeline_steps %}<section class="card" id="required-preparation-step" role="alert" aria-labelledby="required-preparation-title"><h2 id="required-preparation-title">No se inició la corrida de {{ required_model_label }}</h2><p>Falta en el plan del modelo: <strong>{% for required_step in required_pipeline_steps %}{{ required_step.label }}{% if not forloop.last %}, {% endif %}{% endfor %}</strong>.</p>{% if requires_temporal_windows %}<p>Las ventanas reúnen frames vecinos de una misma sesión y segmento. Así VAME puede aprender movimiento sin cruzar cortes del video.</p>{% else %}<p>El modelo necesita estos pasos de entrada antes de poder ejecutarse.</p>{% endif %}<p>La corrida no empezó y no modificó tus datos. {% if required_recipe_preset %}Cargá la receta histórica para recuperar sus parámetros y transformaciones disponibles; revisala y guardá una nueva revisión del plan.{% else %}Volvé a Configurar, agregá el paso y guardá una nueva revisión del plan.{% endif %}</p><div class="actions">{% if required_recipe_preset %}<a class="button" href="{% url 'page' study.pk 'flow' %}?recipe_preset={{ required_recipe_preset.id|urlencode }}#pipeline-form">Cargar receta {{ required_recipe_preset.name }}</a>{% else %}<a class="button" href="{% url 'page' study.pk 'flow' %}">Volver a Configurar el modelo</a>{% endif %}<a href="{% url 'page' study.pk 'prepare' %}#preparation-form">Revisar preparación de datos</a></div></section>{% endif %}
+<section class="card" aria-labelledby="preparation-workflow-title"><h3 id="preparation-workflow-title">Cómo preparar los datos por separado del modelo</h3><ol><li>Elegí la revisión del dataset y agregá los pasos en el orden en que deben aplicarse.</li><li>Previsualizá para comprobar una muestra de entrenamiento y evaluación. La vista previa no guarda ni procesa el dataset.</li><li>Guardá la receta y, cuando esté lista, pulsá “Procesar y guardar un dataset”. Procesar la receta crea una nueva revisión de datos; después podés elegirla en Flujo.</li></ol><p class="muted">El centrado estima cada coordenada solo con las sesiones de entrenamiento. La vista previa conserva sesión, frame y partición.</p><div class="actions"><a class="button" href="{% url 'page' study.pk 'data' %}">Revisar fuentes y particiones</a><a class="button" href="{% url 'page' study.pk 'flow' %}">Configurar un modelo</a></div></section>
+{% if pose_coordinate_parts %}<details class="card" id="prepare-pose-preview" open><summary>Vista visual de pose y ROI · {{ pose_coordinate_parts|join:', ' }}</summary><p>STORM detectó las partes {{ pose_coordinate_parts|join:', ' }} al emparejar las variables <code>parte_x</code> y <code>parte_y</code>. Elegí una o varias partes y recorré sus frames. Esta vista usa la pose registrada original; la tabla de vista previa de la receta, más abajo, muestra los valores transformados.</p><p class="muted">Cada parte tiene un color · rosa: frame actual · ocre: ROI. Los ROI se superponen cuando incluyen la forma del frame.</p>{% if pose_motion_preview or pose_preview_store %}{% include 'storm_studio/pose_motion_preview.html' %}{% else %}<p role="status">Se detectaron coordenadas, pero todavía no hay una muestra visual. Volvé a Datos y actualizá el inventario.</p><a class="button" href="{% url 'page' study.pk 'data' %}">Actualizar inventario en Datos</a>{% endif %}</details>{% elif dataset_revision %}<section class="card" aria-labelledby="prepare-pose-preview-title"><h3 id="prepare-pose-preview-title">Vista visual de pose y ROI</h3><p>No se encontraron pares de variables x/y con nombres compatibles. Revisá las columnas detectadas en Datos; el visor necesita, por ejemplo, <code>nose_x</code> y <code>nose_y</code> para mostrar esa parte. Los ROI se dibujan si incluyen una forma del frame.</p><p><strong>Variables encontradas:</strong> {{ dataset_feature_names|join:', '|default:'ninguna' }}</p><a class="button" href="{% url 'page' study.pk 'data' %}">Revisar inventario en Datos</a></section>{% else %}<section class="card" aria-labelledby="prepare-pose-preview-title"><h3 id="prepare-pose-preview-title">Vista visual de pose y ROI</h3><p>Primero registrá los archivos de pose y ROI y completá el inventario. Después vas a poder seleccionar una sesión, una parte corporal y el frame que querés inspeccionar.</p><a class="button" href="{% url 'page' study.pk 'data' %}">Registrar datos en Datos</a></section>{% endif %}
+<section class="card"><h3>Diseñar una receta</h3>
+<form method="post" id="preparation-form">{% csrf_token %}{% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+{% if form.non_field_errors %}<div role="alert">{{ form.non_field_errors }}</div>{% endif %}
+<div class="grid"><div><label for="{{ form.name.id_for_label }}">{{ form.name.label }}</label>{{ form.name }}{{ form.name.errors }}</div><div><label for="{{ form.dataset_revision_id.id_for_label }}">{{ form.dataset_revision_id.label }}</label>{{ form.dataset_revision_id }}{{ form.dataset_revision_id.errors }}</div></div>
+<h4>Pasos disponibles en este worker</h4><div class="actions" id="preparation-palette"></div><ol id="preparation-steps" aria-label="Pasos de procesamiento, en orden"></ol>{{ form.steps.errors }}
+<div class="actions"><button type="button" id="preview-preparation" data-url="{% url 'pipeline-preview' study.pk %}">Previsualizar sobre el dataset</button><button type="submit">Guardar receta</button></div><p id="preparation-status" role="status" aria-live="polite"></p>
+<div class="table-scroll"><table id="preparation-preview" hidden><caption>Resultado final · hasta cinco observaciones por partición.</caption><thead><tr><th>Partición</th><th>ID de observación</th><th>Entrada</th><th>Resultado final</th></tr></thead><tbody></tbody></table></div><div id="preparation-stage-results" class="table-scroll" hidden aria-live="polite"></div></form></section>
+{% if preparation_revisions %}<section class="card"><h3>Recetas activas</h3><p>Podés cargar una receta anterior al editor; al guardarla se crea una nueva revisión vinculada a esa versión. Procesar una receta crea una salida de datos y no modifica la fuente.</p>{% for recipe in preparation_revisions %}<article><h4>{{ recipe.payload.name }} · revisión {{ recipe.pk }}</h4><p>Dataset r{{ recipe.payload.dataset_revision_id }} · {{ recipe.payload.steps|length }} pasos</p><div class="actions"><a class="button" href="?recipe_revision={{ recipe.pk }}#preparation-form">Cargar en el editor</a><form method="post">{% csrf_token %}<input type="hidden" name="run_preparation_revision_id" value="{{ recipe.pk }}"><button>Procesar y guardar un dataset</button></form><form method="post" action="{% url 'archive-preparation' recipe.pk %}">{% csrf_token %}<button{% if recipe.in_use %} disabled aria-describedby="recipe-{{ recipe.pk }}-archive-help"{% endif %}>Archivar receta</button></form></div>{% if recipe.in_use %}<small class="muted" id="recipe-{{ recipe.pk }}-archive-help">No se puede archivar mientras esta receta pertenezca al plan activo o tenga un trabajo en curso.</small>{% endif %}</article>{% endfor %}</section>{% endif %}
+<details class="card" id="archived-preparations"><summary>Recetas archivadas · {{ archived_preparations|length }}</summary>{% for item in archived_preparations %}<article><h3>{{ item.preparation.payload.name }} · revisión {{ item.preparation.pk }}</h3><p>Dataset r{{ item.preparation.payload.dataset_revision_id }} · archivada {{ item.archived_at }}</p><div class="actions"><a class="button" href="?recipe_revision={{ item.preparation.pk }}#preparation-form">Cargar para editar</a><form method="post" action="{% url 'archive-preparation' item.preparation.pk %}">{% csrf_token %}<button>Restaurar receta</button></form></div><small class="muted">Guardar desde el editor crea una revisión nueva; esta receta archivada se conserva sin cambios.</small></article>{% empty %}<p>No hay recetas archivadas.</p>{% endfor %}</details>
+{{ preparation_step_catalog|json_script:'preparation-step-catalog' }}{{ dataset_feature_names|json_script:'pose-feature-names' }}
+<script>
+(() => {
+  const form = document.getElementById('preparation-form');
+  const stepsField = document.getElementById('id_steps');
+  const list = document.getElementById('preparation-steps');
+  const palette = document.getElementById('preparation-palette');
+  const features = JSON.parse(document.getElementById('pose-feature-names').textContent);
+  const stepsCatalog = JSON.parse(document.getElementById('preparation-step-catalog').textContent);
+  const previewButton = document.getElementById('preview-preparation');
+  const previewTable = document.getElementById('preparation-preview');
+  const previewBody = previewTable.querySelector('tbody');
+  const stageResults = document.getElementById('preparation-stage-results');
+  const status = document.getElementById('preparation-status');
+  const bodyparts = names => [...new Set(names.filter(name => name.endsWith('_x') && names.includes(`${name.slice(0,-2)}_y`)).map(name => name.slice(0,-2)))];
+  const parts = bodyparts(features);
+  const read = () => { try { return JSON.parse(stepsField.value || '[]'); } catch (_) { return []; } };
+  const featuresBefore = (steps, position) => { let current = [...features]; for (const step of steps.slice(0, position)) if (step.type === 'pose.select_coordinates') current = step.config?.names || current; return current; };
+  const defaults = (type, availableFeatures = features) => {
+    const availableParts = bodyparts(availableFeatures);
+    if (type === 'center') return {type};
+    if (type === 'scale') return {type, factor: 1};
+    if (type === 'pose.select_coordinates') return {type, config: {names: [...availableFeatures]}};
+    if (type === 'pose.recenter') return {type, config: {center_bodypart: availableParts[0] || '', bodyparts: [...availableParts]}};
+    if (type === 'pose.orient_coordinates') return {type, config: {from_bodypart: availableParts[0] || '', toward_bodypart: availableParts[1] || '', target_angle_degrees: 45, degenerate_reference_policy: 'error'}};
+    if (type === 'pose.likelihood_filter') return {type, config: {threshold: 0.6, bodyparts: [...availableParts]}};
+    if (type === 'pose.temporal_windows') return {type, config: {offsets: [-1, 0, 1]}};
+    return {type, config: {}};
+  };
+  function changed(current = read()) { stepsField.value = JSON.stringify(current); previewTable.hidden = true; stageResults.hidden = true; stageResults.replaceChildren(); status.textContent = 'La receta cambió. Volvé a previsualizar.'; }
+  function bodypartSelect(choices, value, multiple = false) {
+    const select = document.createElement('select'); select.multiple = multiple; select.size = multiple ? Math.min(6, Math.max(2, choices.length)) : 1;
+    for (const part of choices) { const option = document.createElement('option'); option.value = part; option.textContent = part; option.selected = multiple ? value.includes(part) : part === value; select.append(option); }
+    return select;
+  }
+  function render() {
+    palette.replaceChildren();
+    for (const spec of stepsCatalog) { const button = document.createElement('button'); button.type = 'button'; button.dataset.stepType = spec.type; button.textContent = `Agregar: ${spec.label}`; const currentParts = bodyparts(featuresBefore(read(), read().length)); button.disabled = ['coordinates','recenter','likelihood'].includes(spec.ui) && !currentParts.length || spec.ui === 'orientation' && currentParts.length < 2; button.addEventListener('click', () => { const next = read(); next.push(defaults(spec.type, featuresBefore(next, next.length))); stepsField.value = JSON.stringify(next); render(); changed(); }); palette.append(button); }
+    const steps = read(); list.replaceChildren();
+    steps.forEach((step, index) => {
+      const item = document.createElement('li'); item.className = 'card';
+      const spec = stepsCatalog.find(candidate => candidate.type === step.type); const title = document.createElement('strong'); title.textContent = spec?.label || step.type; item.append(title);
+      const config = step.config || {};
+      const currentFeatures = featuresBefore(steps, index);
+      const currentParts = bodyparts(currentFeatures);
+      if (step.type === 'scale') { const label = document.createElement('label'); label.textContent = 'Factor'; const input = document.createElement('input'); input.type = 'number'; input.step = 'any'; input.value = step.factor ?? 1; input.addEventListener('input', () => { step.factor = Number(input.value); changed(steps); }); label.append(input); item.append(label); }
+      if (step.type === 'pose.select_coordinates') { const label = document.createElement('label'); label.textContent = 'Coordenadas'; const select = document.createElement('select'); select.multiple = true; select.size = Math.min(8, Math.max(3, currentFeatures.length)); for (const name of currentFeatures) { const option = document.createElement('option'); option.value = name; option.textContent = name; option.selected = (config.names || currentFeatures).includes(name); select.append(option); } select.addEventListener('change', () => { config.names = [...select.selectedOptions].map(option => option.value); step.config = config; changed(steps); render(); }); label.append(select); item.append(label); }
+      if (step.type === 'pose.recenter') { const centerLabel = document.createElement('label'); centerLabel.textContent = 'Punto que define el origen'; const center = bodypartSelect(currentParts, config.center_bodypart || currentParts[0]); center.value = config.center_bodypart || currentParts[0] || ''; center.addEventListener('change', () => { config.center_bodypart = center.value; step.config = config; changed(steps); }); centerLabel.append(center); const targetLabel = document.createElement('label'); targetLabel.textContent = 'Puntos a recentrar'; const targets = bodypartSelect(currentParts, config.bodyparts || currentParts, true); targets.addEventListener('change', () => { config.bodyparts = [...targets.selectedOptions].map(option => option.value); step.config = config; changed(steps); }); targetLabel.append(targets); item.append(centerLabel, targetLabel); }
+      if (step.type === 'pose.orient_coordinates') { const fromLabel = document.createElement('label'); fromLabel.textContent = 'Inicio del eje corporal'; const from = bodypartSelect(currentParts, config.from_bodypart || currentParts[0]); from.value = config.from_bodypart || currentParts[0] || ''; from.addEventListener('change', () => { config.from_bodypart = from.value; step.config = config; changed(steps); }); fromLabel.append(from); const towardLabel = document.createElement('label'); towardLabel.textContent = 'Dirección del eje'; const toward = bodypartSelect(currentParts, config.toward_bodypart || currentParts[1]); toward.value = config.toward_bodypart || currentParts[1] || ''; toward.addEventListener('change', () => { config.toward_bodypart = toward.value; step.config = config; changed(steps); }); towardLabel.append(toward); const angleLabel = document.createElement('label'); angleLabel.textContent = 'Ángulo objetivo (grados)'; const angle = document.createElement('input'); angle.type = 'number'; angle.min = '-180'; angle.max = '180'; angle.step = 'any'; angle.value = config.target_angle_degrees ?? 45; angle.addEventListener('input', () => { config.target_angle_degrees = Number(angle.value); step.config = config; note.textContent = `Gira las coordenadas seleccionadas para alinear este eje con ${config.target_angle_degrees}°. Si las referencias coinciden, elegí si querés detener el procesamiento o conservar ese frame sin rotación.`; changed(steps); }); angleLabel.append(angle); const policyLabel = document.createElement('label'); policyLabel.textContent = 'Frames con referencias coincidentes'; const policy = document.createElement('select'); for (const [value, label] of [['error', 'Detener y revisar'], ['identity', 'Dejar el frame sin rotación']]) { const option = document.createElement('option'); option.value = value; option.textContent = label; policy.append(option); } policy.value = config.degenerate_reference_policy || 'error'; policy.addEventListener('change', () => { config.degenerate_reference_policy = policy.value; step.config = config; changed(steps); }); policyLabel.append(policy); const note = document.createElement('p'); note.className = 'muted'; note.textContent = `Gira las coordenadas seleccionadas para alinear este eje con ${config.target_angle_degrees ?? 45}°. Si las referencias coinciden, elegí si querés detener el procesamiento o conservar ese frame sin rotación.`; item.append(fromLabel, towardLabel, angleLabel, policyLabel, note); }
+      if (step.type === 'pose.likelihood_filter') { const thresholdLabel = document.createElement('label'); thresholdLabel.textContent = 'Confianza mínima (0–1)'; const threshold = document.createElement('input'); threshold.type = 'number'; threshold.min = '0'; threshold.max = '1'; threshold.step = 'any'; threshold.value = config.threshold ?? 0.6; threshold.addEventListener('input', () => { config.threshold = Number(threshold.value); step.config = config; changed(steps); }); thresholdLabel.append(threshold); const targetLabel = document.createElement('label'); targetLabel.textContent = 'Puntos incluidos'; const targets = bodypartSelect(currentParts, config.bodyparts || currentParts, true); targets.addEventListener('change', () => { config.bodyparts = [...targets.selectedOptions].map(option => option.value); step.config = config; changed(steps); }); targetLabel.append(targets); item.append(thresholdLabel, targetLabel); }
+      if (step.type === 'pose.temporal_windows') { const label = document.createElement('label'); label.textContent = 'Desplazamientos en frames (ordenados, incluir 0)'; const input = document.createElement('input'); input.type = 'text'; input.value = (config.offsets || [-1,0,1]).join(', '); input.addEventListener('change', () => { config.offsets = input.value.split(',').map(value => Number(value.trim())); step.config = config; changed(steps); }); label.append(input); item.append(label); }
+      if (step.type === 'center') { const note = document.createElement('p'); note.className = 'muted'; note.textContent = 'Calcula una media por coordenada en entrenamiento y la resta en todas las particiones.'; item.append(note); }
+      const actions = document.createElement('div'); actions.className = 'actions';
+      for (const [label, delta] of [['Subir',-1],['Bajar',1]]) { const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.disabled = index + delta < 0 || index + delta >= steps.length; button.addEventListener('click', () => { [steps[index],steps[index+delta]] = [steps[index+delta],steps[index]]; stepsField.value = JSON.stringify(steps); render(); changed(); }); actions.append(button); }
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Quitar'; remove.addEventListener('click', () => { steps.splice(index,1); stepsField.value = JSON.stringify(steps); render(); changed(); }); actions.append(remove); item.append(actions); list.append(item);
+    });
+    if (!steps.length) { const empty = document.createElement('li'); empty.className = 'muted'; empty.textContent = 'Agregá los pasos que necesita tu análisis.'; list.append(empty); }
+  }
+  render();
+  previewButton.addEventListener('click', async () => {
+    previewButton.disabled = true; previewTable.hidden = true; stageResults.hidden = true; status.textContent = 'Preparando una muestra…';
+    try {
+      const response = await fetch(previewButton.dataset.url, {method:'POST', body:new FormData(form), credentials:'same-origin', headers:{'X-Requested-With':'XMLHttpRequest'}});
+      const result = await response.json(); if (!response.ok) throw new Error(result.error || 'No se pudo previsualizar la receta.');
+      previewBody.replaceChildren();
+      for (const [partition, rows] of [['Entrenamiento',result.training],['Evaluación',result.evaluation]]) for (const row of rows) {
+        const tr = document.createElement('tr');
+        for (const value of [partition,row.observation_id,JSON.stringify(row.input),JSON.stringify(row.prepared)]) {
+          const td = document.createElement('td'); td.textContent = value; tr.append(td);
+        }
+        previewBody.append(tr);
+      }
+      stageResults.replaceChildren();
+      for (const [index, stage] of result.stages.entries()) {
+        const spec = stepsCatalog.find(item => item.type === stage.type);
+        const article = document.createElement('article'); article.className = 'card';
+        const heading = document.createElement('h4'); heading.textContent = `Paso ${index + 1}: ${spec?.label || stage.type}`; article.append(heading);
+        const summary = document.createElement('p'); summary.textContent = `Filas después del paso: ${stage.training_row_count} de entrenamiento · ${stage.evaluation_row_count} de evaluación.`; article.append(summary);
+        for (const [partition, rows] of [['Entrenamiento',stage.training],['Evaluación',stage.evaluation]]) {
+          const table = document.createElement('table'); const caption = document.createElement('caption'); caption.textContent = `${partition} · valores después de este paso`; table.append(caption);
+          const thead = document.createElement('thead'); const header = document.createElement('tr');
+          for (const label of ['Observación','Sesión','Frame','Reserva de evaluación','Valor']) { const th = document.createElement('th'); th.scope = 'col'; th.textContent = label; header.append(th); }
+          thead.append(header); table.append(thead); const tbody = document.createElement('tbody');
+          for (const row of rows) { const tr = document.createElement('tr'); for (const value of [row.observation_id,row.session_id ?? '',row.frame ?? '',row.reserved_evaluation ? 'Sí · protegida' : 'No',JSON.stringify(row.value)]) { const td = document.createElement('td'); td.textContent = value; tr.append(td); } tbody.append(tr); }
+          table.append(tbody); article.append(table);
+        }
+        stageResults.append(article);
+      }
+      previewTable.hidden = false; stageResults.hidden = !result.stages.length;
+      status.textContent = `Vista previa lista: ${result.training.length} filas finales de entrenamiento y ${result.evaluation.length} de evaluación. Revisá también la muestra de cada etapa.`;
+    } catch(error) { status.textContent = error.message; } finally { previewButton.disabled = false; }
+  });
+})();
+</script>
+{% elif section == 'flow' %}
+{% if recipe_presets %}<section class="card" aria-labelledby="historical-recipes-title"><h2 id="historical-recipes-title">Recetas VAME recuperables de Tesis_Facu</h2><p>Elegí una receta para cargar su modelo, parámetros y pasos en el formulario. Guardarla crea una revisión del plan en este estudio.</p>{% for preset in recipe_presets %}<article class="card"><h3>{{ preset.name }}</h3><p>{{ preset.description }}</p><p><strong>Origen:</strong> {{ preset.provenance }}</p><p class="muted">{{ preset.status }}</p><a class="button" href="?recipe_preset={{ preset.id|urlencode }}">Cargar esta receta</a></article>{% endfor %}{% if selected_recipe_preset %}<p role="status">Cargada: {{ selected_recipe_preset.name }}. Revisá los parámetros y las particiones antes de guardar.</p>{% endif %}</section>{% endif %}
+<section class="card"><p>Configurá una receta visual. Guardar crea una revisión; la ejecución se inicia después y conserva esta configuración.</p>
+<form method="post" id="pipeline-form">{% csrf_token %}
+{% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+{% if form.non_field_errors %}<div role="alert">{{ form.non_field_errors }}</div>{% endif %}
+<section aria-labelledby="pipeline-overview-title"><h3 id="pipeline-overview-title">Vista general de la pipeline</h3><ol class="pipeline-overview"><li><strong>Datos</strong><small>{{ dataset_summary.rows }} filas · particiones definidas</small></li><li><strong>Preparación común</strong><small id="pipeline-step-summary">Se aplica a todas las ramas</small></li><li><strong>Ramas de modelos</strong><small id="pipeline-model-summary">Modelo principal y variantes</small></li></ol></section>
+<div class="grid">
+<div><label for="{{ form.operation.id_for_label }}">{{ form.operation.label }}</label>{{ form.operation }}{{ form.operation.errors }}<small class="muted" id="operation-help"></small></div>
+<div><label for="{{ form.connector.id_for_label }}">{{ form.connector.label }}</label>{{ form.connector }}{{ form.connector.errors }}</div>
+<div><label for="{{ form.model.id_for_label }}">Modelo de esta rama</label>{{ form.model }}{{ form.model.errors }}<small class="muted" id="model-description"></small></div>
+<div><label for="{{ form.seed.id_for_label }}">Semilla aleatoria</label>{{ form.seed }}{{ form.seed.errors }}</div>
+<div><label for="{{ form.metrics.id_for_label }}">Métricas</label>{{ form.metrics }}{{ form.metrics.errors }}</div>
+</div>
+<section class="card" aria-labelledby="data-config-title"><h3 id="data-config-title">Datos y particiones</h3><div><label for="{{ form.dataset_revision_id.id_for_label }}">Fuente registrada</label>{{ form.dataset_revision_id }}{{ form.dataset_revision_id.errors }}<small class="muted">Elegí una revisión inspeccionada para que el worker recupere pose, etiquetas y metadatos originales. Dejá “Usar datos del plan” para entradas manuales.</small></div><div><label for="{{ form.label_correction_revision_id.id_for_label }}">{{ form.label_correction_revision_id.label }}</label>{{ form.label_correction_revision_id }}{{ form.label_correction_revision_id.errors }}<small class="muted">Esto crea una revisión nueva del plan. Sólo agrega correcciones a observaciones de entrenamiento sin reserva; las particiones de evaluación quedan intactas.</small></div><p>Usá los índices de observación que se muestran en la vista previa. Separalos con comas. Las particiones deben ser disjuntas.</p><div class="grid">{% for row in partition_rows %}<div><label for="partition-{{ row.key }}">{{ row.label }} (índices)</label><input id="partition-{{ row.key }}" data-partition="{{ row.key }}" value="{{ row.value }}" inputmode="numeric" aria-describedby="partition-help"></div>{% endfor %}</div><small id="partition-help" class="muted">Ejemplo: 0, 1, 2. La reserva de evaluación y las máscaras del benchmark se administran desde Datos.</small>{{ form.data.errors }}</section>
+<section class="card" aria-labelledby="model-config-title"><h3 id="model-config-title">Parámetros del modelo</h3><p>Los campos cambian según el modelo elegido. Studio valida estos valores al guardar.</p><div id="config-fields" class="grid"></div>{{ form.config.errors }}</section>
+<section class="card" aria-labelledby="prep-title"><h3 id="prep-title">Receta de procesamiento</h3><label for="{{ form.preparation_revision_id.id_for_label }}">Pipeline codeless guardada</label>{{ form.preparation_revision_id }}{{ form.preparation_revision_id.errors }}<p>Las transformaciones se diseñan en Preparar, se previsualizan sobre el dataset y se reutilizan en este plan. <a href="{% url 'page' study.pk 'prepare' %}">Crear o editar una receta</a>.</p>{{ form.steps.errors }}<div hidden><ol id="steps-preview"></ol><button type="button" id="preview-pipeline" data-url="{% url 'pipeline-preview' study.pk %}">Vista previa heredada</button><p id="preview-status"></p><table id="pipeline-preview-table"><tbody></tbody></table></div></section>
+<section class="card" aria-labelledby="branches-title"><h3 id="branches-title">Ramas para comparar</h3><p>Elegí otros modelos para evaluar con estos mismos datos y pasos de preparación. Podés ajustar sus parámetros por separado.</p><fieldset><legend>Modelos adicionales</legend>{{ form.branch_models }}{{ form.branch_models.errors }}</fieldset><div id="branch-config-fields" class="grid"></div>{{ form.branch_configs.errors }}</section>
+<button>Guardar revisión del plan</button></form></section>
+{{ catalog|json_script:'catalog-data' }}
+{{ dataset_adapter_map|json_script:'dataset-adapter-map' }}
+<script>
+(() => {
+  const catalog = JSON.parse(document.getElementById('catalog-data').textContent);
+  const adapterMap = JSON.parse(document.getElementById('dataset-adapter-map').textContent);
+  const datasetRevisionSelect = document.getElementById('id_dataset_revision_id');
+  const connectorSelect = document.getElementById('id_connector');
+  const updateSourceConnector = () => {
+    const adapter = adapterMap[datasetRevisionSelect.value];
+    if (adapter && [...connectorSelect.options].some(option => option.value === adapter)) {
+      connectorSelect.value = adapter;
+    }
+  };
+  datasetRevisionSelect.addEventListener('change', updateSourceConnector);
+  updateSourceConnector();
+  const modelSelect = document.getElementById('id_model');
+  const operationSelect = document.getElementById('id_operation');
+  const operationHelp = document.getElementById('operation-help');
+  const config = document.getElementById('id_config');
+  const configFields = document.getElementById('config-fields');
+  const modelDescription = document.getElementById('model-description');
+  const stepsField = document.getElementById('id_steps');
+  const dataField = document.getElementById('id_data');
+  const stepsList = document.getElementById('steps-preview');
+  const branchConfigsField = document.getElementById('id_branch_configs');
+  const branchConfigFields = document.getElementById('branch-config-fields');
+  const stepSummary = document.getElementById('pipeline-step-summary');
+  const modelSummary = document.getElementById('pipeline-model-summary');
+  const previewButton = document.getElementById('preview-pipeline');
+  const previewStatus = document.getElementById('preview-status');
+  const previewTable = document.getElementById('pipeline-preview-table');
+  const previewBody = previewTable.querySelector('tbody');
+
+  const readable = value => value.replaceAll('_', ' ').replace(/^./, char => char.toUpperCase());
+  function updateOperationAvailability(model) {
+    const inferOption = operationSelect.querySelector('option[value="infer"]');
+    const capabilities = model?.capabilities || [];
+    const canLoadPretrained = capabilities.includes('infer') &&
+      !capabilities.some(capability => capability === 'train' || capability === 'group');
+    inferOption.disabled = !canLoadPretrained;
+    if (!canLoadPretrained && operationSelect.value === 'infer') operationSelect.value = 'train';
+    operationHelp.textContent = canLoadPretrained
+      ? 'Usa el adapter y los pesos preentrenados indicados en su configuración.'
+      : 'Para inferir con un modelo ajustado, abrí su corrida guardada en Modelos.';
+  }
+  function renderConfigValue(name, schema, value, id, update, required = false) {
+    const wrapper = document.createElement('div');
+    const label = document.createElement('label');
+    label.htmlFor = id;
+    label.textContent = readable(name);
+    const kind = schema.type;
+    if (kind === 'array' || (kind === 'object' &&
+        (!value || typeof value !== 'object' || Array.isArray(value) || !Object.keys(value).length))) {
+      const textarea = document.createElement('textarea');
+      textarea.id = id;
+      textarea.rows = 3;
+      textarea.spellcheck = false;
+      textarea.required = required;
+      textarea.value = JSON.stringify(value ?? schema.default ?? (kind === 'array' ? [] : {}), null, 2);
+      const hint = document.createElement('small');
+      hint.className = 'muted';
+      hint.textContent = schema.description ||
+        (kind === 'array' ? 'Lista en formato JSON.' : 'Objeto en formato JSON.');
+      const commit = () => {
+        try {
+          const parsed = JSON.parse(textarea.value);
+          if ((kind === 'array' && !Array.isArray(parsed)) ||
+              (kind === 'object' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)))) {
+            throw new Error();
+          }
+          textarea.setCustomValidity('');
+          update(parsed);
+        } catch (_) {
+          textarea.setCustomValidity(kind === 'array'
+            ? 'Ingresá una lista JSON válida.' : 'Ingresá un objeto JSON válido.');
+        }
+      };
+      textarea.addEventListener('input', commit);
+      wrapper.append(label, textarea, hint);
+      return wrapper;
+    }
+    if (kind === 'object') {
+      const defaults = schema.default && typeof schema.default === 'object' && !Array.isArray(schema.default)
+        ? schema.default : {};
+      const nested = {...defaults, ...value};
+      const fieldset = document.createElement('fieldset');
+      fieldset.id = id;
+      fieldset.className = 'model-config-object';
+      const legend = document.createElement('legend');
+      legend.textContent = readable(name);
+      fieldset.append(legend);
+      if (schema.description) {
+        const hint = document.createElement('small');
+        hint.className = 'muted';
+        hint.textContent = schema.description;
+        fieldset.append(hint);
+      }
+      for (const [key, initial] of Object.entries(nested)) {
+        const childSchema = {type: typeof initial === 'boolean' ? 'boolean' :
+          (typeof initial === 'number' ? (Number.isInteger(initial) ? 'integer' : 'number') : 'string')};
+        const child = renderConfigValue(key, childSchema, initial, `${id}-${key}`, next => {
+          if (next === undefined) delete nested[key]; else nested[key] = next;
+          update({...nested});
+        });
+        fieldset.append(child);
+      }
+      return fieldset;
+    }
+    let input;
+    if (Array.isArray(schema.enum)) {
+      input = document.createElement('select');
+      for (const choice of schema.enum) {
+        const option = document.createElement('option');
+        option.value = String(choice); option.textContent = readable(String(choice)); input.append(option);
+      }
+    } else {
+      input = document.createElement('input');
+      input.type = kind === 'boolean' ? 'checkbox' :
+        (kind === 'number' || kind === 'integer' ? 'number' : 'text');
+      if (input.type === 'number') {
+        input.step = kind === 'integer' ? '1' : 'any';
+        if (schema.minimum !== undefined) input.min = schema.minimum;
+        if (schema.maximum !== undefined) input.max = schema.maximum;
+      }
+    }
+    input.id = id;
+    input.required = required;
+    if (input.type === 'checkbox') input.checked = Boolean(value);
+    else if (value !== undefined) input.value = value;
+    const commit = () => {
+      const next = input.type === 'checkbox' ? input.checked :
+        (input.type === 'number' ? (input.value === '' ? undefined : Number(input.value)) : input.value);
+      update(next);
+    };
+    input.addEventListener('input', commit);
+    input.addEventListener('change', commit);
+    wrapper.append(label, input);
+    if (schema.description) {
+      const hint = document.createElement('small');
+      hint.className = 'muted';
+      hint.textContent = schema.description;
+      wrapper.append(hint);
+    }
+    if (schema.minimum !== undefined || schema.maximum !== undefined) {
+      const help = document.createElement('small');
+      help.className = 'muted';
+      help.textContent = `Rango: ${schema.minimum ?? 'sin mínimo'} a ${schema.maximum ?? 'sin máximo'}.`;
+      wrapper.append(help);
+    }
+    return wrapper;
+  }
+  function updateOverview() {
+    const stepCount = (() => { try { return JSON.parse(stepsField.value || '[]').length; } catch (_) { return 0; } })();
+    stepSummary.textContent = stepCount ? `${stepCount} paso${stepCount === 1 ? '' : 's'} en orden` : 'Sin pasos adicionales';
+    const models = [modelSelect.value, ...[...document.querySelectorAll('input[name="branch_models"]:checked')]
+      .map(input => input.value).filter(name => name !== modelSelect.value)];
+    modelSummary.textContent = models.map(readable).join(' · ');
+  }
+  function renderConfig(reset = false) {
+    const model = catalog.find(item => item.name === modelSelect.value);
+    updateOperationAvailability(model);
+    configFields.replaceChildren();
+    if (!model) return;
+    modelDescription.textContent = `Capacidades: ${(model.capabilities || []).join(', ') || 'sin declarar'}.`;
+    if (reset) config.value = '{}';
+    let values = {};
+    try { values = JSON.parse(config.value || '{}'); } catch (_) {}
+    for (const [name, schema] of Object.entries(model.schema.properties || {})) {
+      const id = `model-config-${name}`;
+      const value = values[name] ?? schema.default;
+      const editor = renderConfigValue(name, schema, value, id, next => {
+        const current = (() => { try { return JSON.parse(config.value || '{}'); } catch (_) { return {}; } })();
+        if (next === undefined) delete current[name]; else current[name] = next;
+        config.value = JSON.stringify(current);
+      }, (model.schema.required || []).includes(name));
+      configFields.append(editor);
+    }
+    document.querySelectorAll('input[name="branch_models"]').forEach(input => {
+      input.closest('label').hidden = input.value === model.name;
+    });
+    if (reset || !config.value) config.value = JSON.stringify(values);
+    updateOverview();
+  }
+  function renderBranchConfigs() {
+    let configs = {};
+    try { configs = JSON.parse(branchConfigsField.value || '{}'); } catch (_) {}
+    branchConfigFields.replaceChildren();
+    const selected = [...document.querySelectorAll('input[name="branch_models"]:checked')]
+      .filter(input => input.value !== modelSelect.value);
+    for (const choice of selected) {
+      const model = catalog.find(item => item.name === choice.value);
+      if (!model) continue;
+      const card = document.createElement('section'); card.className = 'card';
+      const heading = document.createElement('h4'); heading.textContent = `Parámetros: ${readable(model.name)}`;
+      card.append(heading);
+      const values = configs[model.name] || {};
+      for (const [name, schema] of Object.entries(model.schema.properties || {})) {
+        const value = values[name] ?? schema.default;
+        const id = `branch-config-${model.name}-${name}`;
+        card.append(renderConfigValue(name, schema, value, id, next => {
+          const current = configs[model.name] || {};
+          if (next === undefined) delete current[name]; else current[name] = next;
+          configs[model.name] = current; branchConfigsField.value = JSON.stringify(configs);
+        }, (model.schema.required || []).includes(name)));
+      }
+      branchConfigFields.append(card);
+    }
+    branchConfigsField.value = JSON.stringify(configs);
+    updateOverview();
+  }
+  modelSelect.addEventListener('change', () => { renderConfig(true); renderBranchConfigs(); });
+  document.querySelectorAll('input[name="branch_models"]').forEach(input =>
+    input.addEventListener('change', renderBranchConfigs));
+  renderConfig();
+  renderBranchConfigs();
+
+  function currentSteps() { try { return JSON.parse(stepsField.value || '[]'); } catch (_) { return []; } }
+  function markPreviewStale() {
+    previewTable.hidden = true;
+    previewStatus.textContent = 'Los pasos o las particiones cambiaron. Volvé a previsualizar.';
+  }
+  function saveSteps(list) { stepsField.value = JSON.stringify(list); renderSteps(); markPreviewStale(); }
+  function renderSteps() {
+    const list = currentSteps();
+    stepsList.replaceChildren();
+    list.forEach((step, index) => {
+      const item = document.createElement('li');
+      item.className = 'card';
+      const title = document.createElement('strong');
+      title.textContent = step.type === 'center' ? 'Centrar valores' :
+        step.type === 'scale' ? 'Multiplicar valores' : readable(step.type);
+      item.append(title);
+      if (step.type === 'center') {
+        const note = document.createElement('p');
+        note.className = 'muted'; note.textContent = 'El centro se ajusta usando solo los índices de entrenamiento.';
+        item.append(note);
+      }
+      if (step.type === 'scale') {
+        const label = document.createElement('label');
+        label.htmlFor = `scale-factor-${index}`; label.textContent = 'Factor de escala';
+        const input = document.createElement('input');
+        input.id = `scale-factor-${index}`; input.type = 'number'; input.step = 'any';
+        input.value = step.factor ?? 2; input.required = true;
+        input.addEventListener('input', () => {
+          const next = currentSteps(); next[index].factor = Number(input.value); stepsField.value = JSON.stringify(next); markPreviewStale();
+        });
+        item.append(label, input);
+      }
+      const actions = document.createElement('div'); actions.className = 'actions';
+      for (const [label, delta] of [['Subir', -1], ['Bajar', 1]]) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+        button.disabled = index + delta < 0 || index + delta >= list.length;
+        button.setAttribute('aria-label', `${label} ${title.textContent}`);
+        button.addEventListener('click', () => {
+          const next = currentSteps(); [next[index], next[index + delta]] = [next[index + delta], next[index]]; saveSteps(next);
+        });
+        actions.append(button);
+      }
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Quitar';
+      remove.setAttribute('aria-label', `Quitar ${title.textContent}`);
+      remove.addEventListener('click', () => { const next = currentSteps(); next.splice(index, 1); saveSteps(next); });
+      actions.append(remove); item.append(actions); stepsList.append(item);
+    });
+    if (!list.length) {
+      const empty = document.createElement('li'); empty.className = 'muted'; empty.textContent = 'Todavía no agregaste pasos.'; stepsList.append(empty);
+    }
+    updateOverview();
+  }
+  document.querySelectorAll('[data-add-step]').forEach(button => button.addEventListener('click', () => {
+    const type = button.dataset.addStep;
+    const list = currentSteps(); list.push(type === 'scale' ? {type, factor: 2} : {type}); saveSteps(list);
+  }));
+  renderSteps();
+
+  function savePartitions() {
+    let data;
+    try { data = JSON.parse(dataField.value || '{}'); } catch (_) { return; }
+    for (const input of document.querySelectorAll('[data-partition]')) {
+      const text = input.value.trim();
+      data[input.dataset.partition] = text ? text.split(',').map(value => Number(value.trim())) : [];
+    }
+      dataField.value = JSON.stringify(data);
+      markPreviewStale();
+  }
+  document.querySelectorAll('[data-partition]').forEach(input => input.addEventListener('input', savePartitions));
+  document.getElementById('id_connector').addEventListener('change', markPreviewStale);
+  previewButton.addEventListener('click', async () => {
+    previewButton.disabled = true;
+    previewStatus.textContent = 'Calculando una muestra…';
+    previewTable.hidden = true;
+    try {
+      const response = await fetch(previewButton.dataset.url, {
+        method: 'POST', body: new FormData(document.getElementById('pipeline-form')),
+        credentials: 'same-origin', headers: {'X-Requested-With': 'XMLHttpRequest'}
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'No se pudo previsualizar la pipeline.');
+      previewBody.replaceChildren();
+      for (const [partition, rows] of [['Entrenamiento', result.training], ['Evaluación', result.evaluation]]) {
+        for (const row of rows) {
+          const tr = document.createElement('tr');
+          for (const value of [partition, `${row.index} · ${row.observation_id}`, JSON.stringify(row.input), JSON.stringify(row.prepared)]) {
+            const td = document.createElement('td'); td.textContent = value; tr.append(td);
+          }
+          previewBody.append(tr);
+        }
+      }
+      previewTable.hidden = false;
+      previewStatus.textContent = 'Vista previa lista. Los parámetros aprendidos se ajustaron sólo con entrenamiento.';
+    } catch (error) {
+      previewStatus.textContent = error.message;
+    } finally {
+      previewButton.disabled = false;
+    }
+  });
+})();
+</script>
+{% elif section == 'components' %}
+<section class="card"><h3>Extensiones disponibles</h3><p>Conectores: {{ registered_connectors|join:', ' }}</p><p>Pasos: {{ registered_steps|join:', ' }} · center (ajustado en entrenamiento)</p><p>Métricas: {{ registered_metrics|join:', ' }}</p><p>Visualizadores: {{ visualizers|join:', ' }}</p></section>
+<section class="card"><h3>Crear extensión</h3><p>El wizard genera un paquete externo con descriptor, licencia, README y prueba inicial. Queda pendiente de implementación hasta completar la prueba; Studio no lo ejecuta.</p><form method="get" action="{% url 'scaffold' %}"><label for="extension-kind">Tipo</label><select id="extension-kind" name="kind"><option value="connector">Conector</option><option value="step">Paso de preparación</option><option value="model">Modelo</option><option value="metric">Métrica</option><option value="visualizer">Visualizador</option></select><label for="extension-name">Nombre</label><input id="extension-name" name="name" value="my_extension" pattern="[A-Za-z][A-Za-z0-9_ -]*" required><button>Descargar skeleton testeable</button></form></section>
+<p>Componentes registrados por el proceso local. Los paquetes adicionales se habilitan al iniciar la aplicación.</p><div class="grid">{% for component in catalog %}<article class="card"><h2>{{ component.name }}</h2><p>Versión {{ component.version }}</p><p>{{ component.capabilities|join:', ' }}</p><details><summary>Configuración</summary><pre>{{ component.schema }}</pre></details></article>{% endfor %}</div>
+{% elif section == 'jobs' %}
+{% if latest %}<section class="card"><h3>Pipeline lista para ejecutar</h3><p>Rama principal: <strong>{{ latest.payload.model }}</strong>. Todas las ramas usan las mismas sesiones, particiones y pasos de preparación.</p>{% if latest.payload.branch_models %}<p>Ramas adicionales: {% for model in latest.payload.branch_models %}<span class="pill">{{ model }}</span> {% endfor %}</p>{% else %}<p>No agregaste ramas adicionales.</p>{% endif %}{% if plan_has_active_jobs %}<p class="pill" role="status">Este plan tiene ejecuciones activas. Su avance aparece abajo y se actualiza automáticamente.</p><button disabled>Plan en ejecución</button>{% else %}<form method="post" action="{% url 'run' latest.pk %}">{% csrf_token %}<div class="actions"><button>{% if latest.payload.operation == 'infer' %}Ejecutar inferencia{% else %}Iniciar entrenamiento de {{ latest.payload.model }}{% endif %}</button>{% if latest.payload.branch_models %}<button name="run_branches" value="1">Iniciar todas las ramas</button>{% endif %}</div></form>{% endif %}</section>{% endif %}
+<p class="muted">El worker procesa los trabajos aunque cierres esta página: <code>uv run storm-studio worker</code>.</p>
+{% for job in jobs %}<article class="card" data-job-card data-job-id="{{ job.pk }}" data-job-status="{{ job.status }}"><h3>{% if job.operation == 'inventory' %}Inventario de datos{% elif job.operation == 'prepare' %}Procesamiento · {{ job.revision.payload.name }}{% elif job.operation == 'video_preview' %}Vista compatible del video · asset {{ job.revision.payload.asset_id }}{% else %}{{ job.revision.payload.model }}{% endif %} · {{ job.pk }}</h3><p class="pill"><span data-job-status-label>{{ job.status_label }}</span> · {% if job.operation == 'infer' %}Inferencia{% elif job.operation == 'apply' %}Inferencia con modelo guardado{% elif job.operation == 'update' %}Actualización incremental{% elif job.operation == 'resume' %}Reanudación{% elif job.operation == 'inventory' %}Inventario{% elif job.operation == 'prepare' %}Procesamiento{% elif job.operation == 'video_preview' %}Preparación de video{% else %}Entrenamiento o agrupamiento{% endif %}</p>
+{% if job.status == 'pending' or job.status == 'running' %}<section class="job-progress" aria-label="Avance de la ejecución"><p><strong>Paso actual:</strong> <span data-progress-label>{{ job.progress_for_ui.label }}</span> · etapa <span data-stage-index>{% if job.progress_for_ui.stage_index %}{{ job.progress_for_ui.stage_index }}{% else %}1{% endif %}</span> de <span data-stage-total>{{ job.progress_for_ui.stage_total }}</span>{% if job.status == 'running' %} · quedan <span data-stages-left>{{ job.stages_after_current }}</span> etapas después de esta{% endif %}</p><progress role="progressbar" data-job-progress max="100" aria-label="Avance de la ejecución"{% if job.progress_is_measurable %} value="{{ job.progress_percent }}" aria-valuetext="{{ job.progress_percent }} por ciento"{% endif %}></progress><p data-progress-detail>{% if job.progress_is_measurable %}Avance informado: <span data-progress-percent>{{ job.progress_percent }}</span>%{% if job.progress_for_ui.phase_step != None and job.progress_for_ui.phase_total != None %} · <span data-phase-step>{{ job.progress_for_ui.phase_step }}</span> de <span data-phase-total>{{ job.progress_for_ui.phase_total }}</span> épocas · restan <span data-units-left>{{ job.progress_units_remaining }}</span> épocas{% endif %}{% else %}El worker está en esta etapa; este modelo todavía no informó un porcentaje.{% endif %}</p><p><strong>Tiempo restante estimado:</strong> <span data-eta-text>{% if job.eta_text %}{{ job.eta_text }}{% elif job.status == 'pending' %}Esperando al worker{% else %}Calculándose con el avance disponible{% endif %}</span></p><small class="muted" data-eta-basis>{% if job.eta_basis %}Estimación basada en {{ job.eta_basis }}.{% elif job.status == 'running' %}La estimación aparecerá cuando haya avance o una ejecución comparable.{% endif %}</small></section>{% endif %}
+{% if job.error %}<pre role="alert">{{ job.error }}</pre>{% endif %}<div class="actions">
+{% if job.status == 'pending' or job.status == 'running' %}<form method="post" action="{% url 'action' job.pk 'cancel' %}">{% csrf_token %}<button>Cancelar</button></form>{% endif %}
+{% if job.pk in resumable %}<form method="post" action="{% url 'action' job.pk 'resume' %}">{% csrf_token %}<button>Retomar desde el último checkpoint</button><small>Continúa desde el punto guardado y crea una ejecución nueva.</small></form>{% endif %}
+{% if job.status == 'failed' or job.status == 'interrupted' or job.status == 'cancelled' %}{% if job.operation == 'video_preview' %}<a href="{% url 'page' study.pk 'data' %}">Volver a intentar desde Datos</a>{% else %}<form method="post" action="{% url 'action' job.pk 'retry' %}">{% csrf_token %}<button>{% if job.operation == 'inventory' %}Reintentar inventario{% elif job.operation == 'prepare' %}Reintentar procesamiento{% else %}Reintentar{% endif %}</button></form>{% endif %}{% endif %}
+{% if job.status == 'completed' %}{% if job.operation == 'inventory' %}<a href="{% url 'page' study.pk 'data' %}">Ver inventario</a>{% elif job.operation == 'prepare' %}<p>Dataset procesado · revisión {{ job.result.prepared_dataset_revision_id }} · {{ job.result.frame_count }} observaciones.</p><a href="{% url 'page' study.pk 'data' %}?prepared_revision={{ job.result.prepared_dataset_revision_id }}#prepared-dataset-result">Ver datos procesados</a> <a href="{% url 'page' study.pk 'flow' %}?dataset_revision_id={{ job.result.prepared_dataset_revision_id }}">Configurar un modelo con estos datos</a>{% elif job.operation == 'video_preview' %}<p>Vista H.264/MP4 lista · {{ job.result.size_bytes }} bytes. El video fuente permanece intacto.</p><a href="{% url 'page' study.pk 'data' %}">Ver Datos</a>{% else %}<a href="{% url 'page' study.pk 'evidence' %}?job={{ job.pk }}">Ver evidencia</a><form method="post" action="{% url 'action' job.pk 'adopt' %}">{% csrf_token %}<label>Justificación para adoptar<textarea name="reason" minlength="1" maxlength="2000" required></textarea></label><button>Adoptar candidato</button></form>{% endif %}{% endif %}</div></article>{% empty %}<p>No hay ejecuciones.</p>{% endfor %}
+<script>
+(() => {
+  const endpoint = '{% url "status" study.pk %}';
+  const cards = new Map([...document.querySelectorAll('[data-job-card]')]
+    .map(card => [card.dataset.jobId, card]));
+  const initialStatuses = new Map([...cards].map(([id, card]) => [id, card.dataset.jobStatus]));
+  const update = (job) => {
+    const card = cards.get(job.id);
+    if (!card) return false;
+    const previousStatus = initialStatuses.get(job.id);
+    if (previousStatus !== job.status) return true;
+    const progress = job.progress || {};
+    const label = card.querySelector('[data-progress-label]');
+    if (label) label.textContent = progress.label || 'Preparando la ejecución';
+    const stageIndex = card.querySelector('[data-stage-index]');
+    if (stageIndex) stageIndex.textContent = String(progress.stage_index || 1);
+    const stageTotal = card.querySelector('[data-stage-total]');
+    if (stageTotal) stageTotal.textContent = String(progress.stage_total || 5);
+    const stagesLeft = card.querySelector('[data-stages-left]');
+    if (stagesLeft) stagesLeft.textContent = String(Math.max(0, (progress.stage_total || 5) - (progress.stage_index || 1)));
+    const bar = card.querySelector('[data-job-progress]');
+    const detail = card.querySelector('[data-progress-detail]');
+    if (bar && typeof job.progress_percent === 'number') {
+      bar.value = job.progress_percent;
+      bar.setAttribute('aria-valuetext', `${job.progress_percent} por ciento`);
+      if (detail) detail.textContent = progress.phase_step != null && progress.phase_total != null
+        ? `Avance informado: ${job.progress_percent}% · época ${progress.phase_step} de ${progress.phase_total}; restan ${Math.max(0, progress.phase_total - progress.phase_step)} épocas`
+        : `Avance informado: ${job.progress_percent}%`;
+    } else if (bar) {
+      bar.removeAttribute('value');
+      bar.removeAttribute('aria-valuetext');
+      if (detail) detail.textContent = 'El worker está en esta etapa; este modelo todavía no informó un porcentaje.';
+    }
+    const eta = card.querySelector('[data-eta-text]');
+    if (eta) eta.textContent = job.eta_text || (job.status === 'pending'
+      ? 'Esperando al worker' : 'Calculándose con el avance disponible');
+    const basis = card.querySelector('[data-eta-basis]');
+    if (basis) basis.textContent = job.eta_basis
+      ? `Estimación basada en ${job.eta_basis}.`
+      : 'La estimación aparecerá cuando haya avance o una ejecución comparable.';
+    const status = card.querySelector('[data-job-status-label]');
+    if (status) status.textContent = job.status_label || job.status;
+    return false;
+  };
+  setInterval(async () => {
+    try {
+      const response = await fetch(endpoint, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      if (!response.ok) return;
+      const payload = await response.json();
+      const summary = document.querySelector('[data-execution-summary]');
+      if (summary && payload.summary) summary.textContent = payload.summary.label;
+      if (payload.jobs.some(update) || payload.jobs.length !== cards.size) location.reload();
+    } catch (error) {}
+  }, 2000);
+})();
+</script>
+{% elif section == 'models' %}
+<section class="card" aria-labelledby="model-workflow-title"><h3 id="model-workflow-title">Entrenar y probar un modelo</h3><p>La configuración y la ejecución están en pasos distintos. Seguí este recorrido para iniciar una corrida y revisar sus resultados:</p><ol><li><strong>Prepará la evaluación:</strong> en Datos, asigná cada sesión a Entrenamiento, Validación o Evaluación. Las sesiones o frames reservados quedan fuera del entrenamiento.</li><li><strong>Configurá el modelo:</strong> elegí el modelo, los datos, la receta de procesamiento y las métricas; guardá el plan.</li><li><strong>Iniciá la corrida:</strong> al guardar el plan, en Ejecuciones aparece el botón “Iniciar entrenamiento”. Al terminar, revisá métricas en la corrida y predicciones en Evidencia.</li></ol><p class="muted">Las métricas supervisadas requieren etiquetas compatibles con la tarea del modelo. Si no están disponibles, podés inspeccionar las predicciones, pero no habrá una prueba de ranking comparable.</p><div class="actions"><a class="button" href="{% url 'page' study.pk 'flow' %}">Configurar entrenamiento y evaluación</a><a class="button" href="{% url 'page' study.pk 'data' %}">Revisar datos y particiones</a>{% if latest %}<a class="button" href="{% url 'page' study.pk 'jobs' %}">Iniciá la corrida y revisá las métricas</a>{% else %}<span class="pill">Guardá el plan para habilitar el inicio desde Ejecuciones.</span>{% endif %}</div></section>
+{% if selected and 'update' in selected.result.capabilities %}<details class="card"><summary>Actualizar incrementalmente {{ selected.result.model }}</summary><p>Agregar un lote nuevo al modelo {{ selected.pk }}. Para reemplazar etiquetas previas, crear un entrenamiento nuevo desde Revisión.</p><form method="post" action="{% url 'action' selected.pk 'update' %}">{% csrf_token %}<label>Datos nuevos y partición de evaluación<textarea name="data">{"inputs": [20, 21], "targets": [40, 42], "train": [0], "test": [1]}</textarea></label><button>Aprobar actualización incremental</button></form></details>{% endif %}
+{% if selected %}<details class="card"><summary>Evaluar un modelo recuperado con datos nuevos</summary><form method="post" action="{% url 'action' selected.pk 'evaluate' %}">{% csrf_token %}<p>{{ selected.result.model }} · {{ selected.pk }}</p><label>Inputs<textarea name="inputs">[6, 7]</textarea></label><label>Targets<textarea name="targets">[12, 14]</textarea></label><button>Evaluar sin reentrenar</button></form></details>{% endif %}
+{% for job in completed %}<article class="card"><h3>{{ job.result.model }} · {{ job.pk }}</h3><p>{{ job.result.capabilities|join:', ' }}</p>{% if 'infer' in job.result.capabilities %}{% if job.result.output_metadata.requires_registered_data_for_inference %}<p class="muted">Este adapter requiere pose y sesiones registradas para aplicar el modelo.</p>{% else %}<form method="post" action="{% url 'action' job.pk 'infer' %}">{% csrf_token %}<label>Inputs nuevos (JSON)<textarea name="inputs">[6, 7, 8]</textarea></label><button>Inferir con modelo guardado</button></form>{% endif %}{% if job.inference_dataset_revisions %}<form method="post" action="{% url 'action' job.pk 'apply' %}">{% csrf_token %}<label>Aplicar a una revisión de datos<select name="dataset_revision_id" required>{% for data_revision in job.inference_dataset_revisions %}<option value="{{ data_revision.pk }}">{{ data_revision.dataset.name }} · r{{ data_revision.number }} · {{ data_revision.inventory.frame_count }} frames</option>{% endfor %}</select></label><p class="muted">Usa el modelo y los pasos ya ajustados; no vuelve a entrenar ni cambia el modelo guardado. Procesa todas las observaciones de la revisión seleccionada.</p><button>Aplicar modelo guardado al dataset</button></form>{% else %}<p class="muted">No hay una revisión de datos lista con el mismo adapter de entrada.</p>{% endif %}{% else %}<p>Este modelo es transductivo: sus grupos pertenecen al conjunto ajustado.</p>{% endif %}</article>{% empty %}<p>Todavía no hay modelos entrenados. Cuando una corrida termine, el modelo guardado aparecerá aquí.</p>{% endfor %}
+{% elif section == 'evidence' %}
+<section class="card" aria-labelledby="analysis-workflow-title"><h3 id="analysis-workflow-title">Cómo analizar una corrida</h3><ol><li>Elegí una corrida completada en la lista y abrila.</li><li>Usá el control “Observación” o la tabla para recorrer los IDs originales. El dato crudo es la entrada; la salida es la predicción o grupo; el target es la etiqueta de referencia y puede estar vacío.</li><li>Si querés pedir una revisión humana, creá un lote. Esto no cambia las etiquetas ni el modelo; el lote aparece en Revisar.</li></ol></section>
+{% if completed %}<form class="card" method="get" aria-label="Elegir corrida para analizar"><label for="analysis-job">Elegí una corrida completada para inspeccionar sus resultados</label><select id="analysis-job" name="job" required>{% for job in completed %}<option value="{{ job.pk }}"{% if selected.pk == job.pk %} selected{% endif %}>{{ job.result.model }} · {{ job.pk }} · {{ job.result.partition }}</option>{% endfor %}</select><button>Abrir corrida</button></form>{% else %}<section class="card"><p>Todavía no hay corridas completadas para analizar. Iniciá el plan o esperá a que termine en Ejecuciones.</p><a class="button" href="{% url 'page' study.pk 'jobs' %}">Ir a Ejecuciones</a></section>{% endif %}
+{% if selected %}<details class="card"><summary>Visualizadores registrados</summary><div class="actions">{% for name in visualizers %}<a href="{% url 'visualization' selected.pk name %}" target="_blank" rel="noopener">{{ name }}</a>{% endfor %}</div><p>Una vista incompatible con las entradas informa el error; no transforma su significado automáticamente.</p></details>
+<p id="evidence-kind" data-visual-kind="{{ evidence_kind }}">{% if evidence_kind == 'categorical' %}Carriles categóricos: los IDs conservan su clase y no representan magnitudes.{% else %}Overlay numérico de dato crudo, predicción y target.{% endif %}</p>
+<details class="card"><summary>Anotar intervalos e interpretar grupos</summary><form method="post" action="{% url 'action' selected.pk 'annotate' %}">{% csrf_token %}<label>Autor/a declarada (si no hay una cuenta iniciada)<input name="author" maxlength="160"></label><label>Motivo de la revisión<textarea name="reason" maxlength="2000" required></textarea></label><label>Taxonomía (nombres genéricos)<textarea name="taxonomy">["A", "B"]</textarea></label><label>Intervalos [start, stop) en índices originales<textarea name="intervals">[]</textarea></label><label>Interpretación de grupos (solo modelos de agrupamiento)<textarea name="mapping">{}</textarea></label><button>Guardar anotaciones humanas</button></form>{% if annotation %}<h3>Revisión humana {{ annotation.pk }}</h3><pre>{{ annotation.payload }}</pre>{% endif %}</details>{% endif %}
+{% if selected %}<details class="card"><summary>Selección activa configurable</summary><form method="post" action="{% url 'action' selected.pk 'review' %}">{% csrf_token %}<label>Estrategia<select name="strategy"><option value="random">Aleatoria reproducible</option><option value="uncertainty">Incertidumbre (requiere probabilidades del adapter)</option></select></label><button>Proponer lote</button></form></details>{% endif %}
+{% if selected %}<section class="card"><p><strong>{{ selected.result.model }}</strong> · {{ selected.pk }} · partición: {{ selected.result.partition }}</p><p class="muted">Semántica: {{ output_metadata.semantics|default:'no declarada' }}{% if output_metadata.confidence_semantics %} · confianza: {{ output_metadata.confidence_semantics }}{% endif %}{% if selected.result.source_execution %} · modelo recuperado desde {{ selected.result.source_execution }}{% endif %}</p><div class="legend" aria-label="Leyenda de evidencia"><span class="raw-key">Dato crudo</span><span class="prediction-key">Predicción</span><span class="target-key">Target</span></div><svg id="raw-view" viewBox="0 0 800 220" role="img" aria-label="Datos crudos, predicciones y targets alineados"></svg><label for="cursor">Observación</label><input id="cursor" type="range" min="0" value="0" max="{{ evidence|length|add:'-1' }}"><p id="selection" aria-live="polite"></p><table><thead><tr><th>ID original</th><th>Dato crudo</th><th>Predicción / grupo</th><th>Target</th><th>Confianza</th></tr></thead><tbody>{% for row in evidence %}<tr data-observation="{{ forloop.counter0 }}"><td>{{ row.index }}</td><td>{{ row.raw }}</td><td>{% if row.prediction_valid %}{{ row.prediction }}{% else %}<span class="muted">Ventana incompleta</span>{% endif %}</td><td>{{ row.target|default_if_none:'—' }}</td><td>{{ row.confidence|default_if_none:'—' }}</td></tr>{% endfor %}</tbody></table><p>El lote usa observaciones de entrenamiento y se revisa en la etapa Revisar.</p><form method="post" action="{% url 'action' selected.pk 'review' %}">{% csrf_token %}<button>Crear lote de revisión</button></form><a href="{% url 'page' study.pk 'review' %}">Ir a Revisar</a></section>
+{{ evidence|json_script:'evidence-data' }}<script>if(document.getElementById('evidence-kind')?.dataset.visualKind==='categorical'){const rs=JSON.parse(document.getElementById('evidence-data').textContent),chart=document.getElementById('raw-view'),ns='http://www.w3.org/2000/svg';chart.setAttribute('viewBox','0 0 800 260');[['raw','Dato crudo','#1754ad'],['prediction','Salida','#7b3fb5'],['target','Target','#bd6400']].forEach(([key,label,color],lane)=>{const y=24+lane*76,head=document.createElementNS(ns,'text');head.setAttribute('x','8');head.setAttribute('y',String(y+12));head.setAttribute('font-size','13');head.setAttribute('fill',color);head.textContent=label;chart.append(head);rs.forEach((row,i)=>{const value=row[key];if(value===null||value===undefined)return;const width=740/Math.max(1,rs.length),rect=document.createElementNS(ns,'rect');rect.setAttribute('x',String(55+i*width));rect.setAttribute('y',String(y+20));rect.setAttribute('width',String(Math.max(2,width-2)));rect.setAttribute('height','30');rect.setAttribute('fill',color);rect.setAttribute('fill-opacity','.22');rect.setAttribute('stroke',color);const title=document.createElementNS(ns,'title');title.textContent=`ID ${row.index}: ${String(value)}`;rect.append(title);chart.append(rect);if(width>38){const text=document.createElementNS(ns,'text');text.setAttribute('x',String(57+i*width));text.setAttribute('y',String(y+40));text.setAttribute('font-size','11');text.textContent=String(value).slice(0,12);chart.append(text)}})})}</script><script>
+const rows=JSON.parse(document.getElementById('evidence-data').textContent),svg=document.getElementById('raw-view'),ns='http://www.w3.org/2000/svg';function line(values,color,dash=''){if(values.some(v=>typeof v!=='number'||!Number.isFinite(v)))return;const all=rows.flatMap(r=>[r.raw,r.prediction,r.target]).filter(v=>typeof v==='number'&&!Number.isNaN(v)),min=Math.min(...all),max=Math.max(...all);const e=document.createElementNS(ns,'polyline');e.setAttribute('points',values.map((v,i)=>`${20+i*760/Math.max(1,values.length-1)},${200-(v-min)*170/(max-min||1)}`).join(' '));e.setAttribute('fill','none');e.setAttribute('stroke',color);e.setAttribute('stroke-width','3');if(dash)e.setAttribute('stroke-dasharray',dash);svg.append(e)}line(rows.map(r=>r.raw),'#1754ad');line(rows.map(r=>r.prediction),'#7b3fb5');line(rows.map(r=>r.target),'#bd6400','8 5');const mark=document.createElementNS(ns,'line');for(const [k,v] of Object.entries({y1:0,y2:220,stroke:'#a13232','stroke-width':2}))mark.setAttribute(k,v);svg.append(mark);function select(){const i=+document.getElementById('cursor').value,r=rows[i];document.getElementById('selection').textContent=`ID ${r.index} · dato ${r.raw} · salida ${r.prediction} · target ${r.target??'sin etiqueta'} · confianza ${r.confidence??'no declarada'}`;mark.setAttribute('x1',20+i*760/Math.max(1,rows.length-1));mark.setAttribute('x2',mark.getAttribute('x1'));document.querySelectorAll('[data-observation]').forEach(e=>e.classList.toggle('selected',+e.dataset.observation===i))}document.getElementById('cursor').oninput=select;select();
+</script>{% else %}<p>No hay resultados para inspeccionar.</p>{% endif %}
+{% elif section == 'review' %}
+<section class="card" aria-labelledby="review-workflow-title"><h3 id="review-workflow-title">Cómo revisar un lote</h3><ol><li>En Analizar, elegí una corrida y pulsá “Crear lote de revisión”.</li><li>En cada lote, usá los IDs originales de la tabla para indicar las etiquetas corregidas. Escribí las correcciones como un objeto JSON con ID original y target numérico, por ejemplo <code>{"2": 0}</code>.</li><li>Las restricciones son opcionales: escribí pares de IDs de entrenamiento, por ejemplo <code>[[4, 9]]</code>. Aceptar crea un plan nuevo; después iniciá la ejecución desde Ejecuciones.</li></ol><p class="muted">Las correcciones se aplican solo a los IDs incluidos en ese lote. La ejecución original y su evidencia se conservan.</p><div class="actions"><a class="button" href="{% url 'page' study.pk 'evidence' %}">Volver a Analizar</a><a class="button" href="{% url 'page' study.pk 'jobs' %}">Abrir Ejecuciones</a></div></section>
+{% for task in reviews %}<details class="card"><summary>Evidencia del lote {{ task.pk }}</summary><table><tr><th>ID</th><th>Input original</th><th>Target vigente</th></tr>{% for row in task.payload.evidence %}<tr><td>{{ row.index }}</td><td>{{ row.input }}</td><td>{{ row.target|default_if_none:'—' }}</td></tr>{% endfor %}</table></details>{% endfor %}
+{% for task in reviews %}<article class="card"><h3>Lote {{ task.pk }}</h3><p>Índices originales para corregir: {{ task.payload.indices }} · estrategia de selección: {{ task.payload.strategy }} · semilla: {{ task.payload.seed }}</p><form method="post" action="{% url 'revise' task.pk %}">{% csrf_token %}<label>Correcciones de etiqueta (objeto JSON: ID original → target)<textarea name="labels">{}</textarea></label><label>Restricciones opcionales (pares de IDs de entrenamiento)<textarea name="constraints">[]</textarea></label><button>Aceptar correcciones y crear plan derivado</button></form></article>{% empty %}<section class="card"><p>Todavía no hay lotes pendientes. Para crear uno, elegí una corrida en Analizar y pulsá “Crear lote de revisión”.</p><a class="button" href="{% url 'page' study.pk 'evidence' %}">Ir a Analizar</a></section>{% endfor %}
+{% elif section == 'compare' %}
+<section class="card" aria-labelledby="compare-runs-title">
+<h3 id="compare-runs-title">Seleccionar ejecuciones</h3>
+{% if completed %}
+<form method="get" aria-label="Seleccionar ejecuciones para comparar">
+<label for="comparison-jobs">Corridas completadas</label>
+<select id="comparison-jobs" name="jobs" multiple size="7" required aria-describedby="comparison-jobs-help">
+{% for job in completed %}<option value="{{ job.pk }}"{% if job.pk|stringformat:'s' in selected_comparison_ids %} selected{% endif %} title="ID completo: {{ job.pk }}">{{ job.result.model }} · {{ job.result.partition }} · corrida {{ forloop.counter }} · {{ job.pk|slice:':8' }}</option>{% endfor %}
+</select>
+<p id="comparison-jobs-help" class="muted">Elegí una o más corridas. En computadora, mantené Ctrl (Windows/Linux) o ⌘ (Mac) mientras seleccionás varias.</p>
+<button>Comparar selección</button>
+</form>
+{% else %}
+<p>No hay corridas completadas para elegir.</p>
+<a class="button" href="{% url 'page' study.pk 'jobs' %}">Ir a Ejecuciones</a>
+{% endif %}
+</section>
+{% if comparison_requested and comparable and comparison_metrics %}<section class="card"><h3>Comparación gráfica de métricas</h3><p>La posición muestra el valor observado; la dirección declarada indica si se minimiza o maximiza. El gráfico no elige un candidato automáticamente.</p>{% for metric in comparison_metrics %}<figure><figcaption>{{ metric.name }} · {{ metric.direction }} ({{ metric.low }} a {{ metric.high }})</figcaption><svg class="metric-plot" viewBox="0 0 800 {{ metric.height }}" role="img" aria-label="{{ metric.name }} en ejecuciones seleccionadas"><line x1="70" y1="8" x2="730" y2="8" stroke="#9ab0c5" />{% for point in metric.points %}<circle cx="{{ point.x }}" cy="{{ point.y }}" r="7" fill="{{ point.color }}"><title>{{ point.model }} · {{ point.job }}: {{ point.value }}</title></circle><text x="8" y="{{ point.y|add:'5' }}" font-size="12">{{ point.model }}</text><text x="{{ point.x|add:'10' }}" y="{{ point.y|add:'5' }}" font-size="12">{{ point.value }}</text>{% endfor %}</svg></figure>{% endfor %}</section>{% endif %}
+{% if comparison_requested %}<section class="card"><h3>Ejecuciones seleccionadas</h3><p>{% if comparable %}Comparable para ranking: datos, partición, tarea, taxonomía y métricas coinciden.{% else %}Inspección solamente; no se habilita ranking conjunto.{% endif %}</p>{% if not comparable %}<ul>{% for reason in comparison_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}<table><tr><th>Modelo</th><th>Ejecución</th><th>Dataset</th><th>Partición</th><th>Métricas</th><th>Evidencia</th></tr>{% for job in compared_jobs %}<tr><td>{{ job.result.model }}</td><td>{{ job.pk }}</td><td>{{ job.result.data_fingerprint|slice:':12' }}</td><td>{{ job.result.partition }}</td><td>{{ job.result.metrics }}</td><td><a href="{% url 'page' study.pk 'evidence' %}?job={{ job.pk }}">Abrir evidencia</a></td></tr>{% endfor %}</table></section>{% if comparison_rows %}<section class="card"><h3>Diferencias en observaciones comunes</h3><p>En agrupamiento, distintos IDs de grupo no implican distintos conceptos.</p><table><tr><th>ID</th><th>Ejecución A</th><th>Ejecución B</th><th>Valores distintos</th></tr>{% for row in comparison_rows %}<tr><td>{{ row.index }}</td><td>{{ row.first }}</td><td>{{ row.second }}</td><td>{{ row.different|yesno:'Sí,No' }}</td></tr>{% endfor %}</table></section>{% endif %}</section>{% endif %}
+<table><tr><th>Modelo</th><th>Ejecución</th><th>Partición</th><th>Métricas</th></tr>{% for job in completed %}<tr><td>{{ job.result.model }}</td><td><a href="{% url 'page' study.pk 'evidence' %}?job={{ job.pk }}">{{ job.pk }}</a></td><td>{{ job.result.partition }}</td><td>{{ job.result.metrics }}</td></tr>{% endfor %}</table>
+{% elif section == 'reports' %}
+<section class="card"><h3>Congelar evidencia reproducible</h3><p>El reporte conserva los resultados de las corridas elegidas, sus planes, revisiones de datos, anotaciones y, si la seleccionás, el estado visual. Las referencias a artefactos binarios quedan identificadas por su digest.</p>
+<form method="post" action="{% url 'freeze-study-report' study.pk %}">{% csrf_token %}<fieldset><legend>Corridas incluidas</legend>{% for job in completed %}<label><input type="checkbox" name="jobs" value="{{ job.pk }}"> {{ job.result.model }} · {{ job.pk }} · {{ job.result.partition }}</label>{% empty %}<p>No hay corridas completadas.</p>{% endfor %}</fieldset>
+<label for="report-snapshot">Estado visual (opcional)</label><select id="report-snapshot" name="snapshot_revision_id"><option value="">Sin snapshot</option>{% for revision in revisions %}{% if revision.kind == 'snapshot' %}<option value="{{ revision.pk }}">Snapshot {{ revision.pk }} · {{ revision.payload.name|default:revision.created }}</option>{% endif %}{% endfor %}</select><button{% if not completed %} disabled{% endif %}>Congelar reporte</button></form></section>
+{% if frozen_reports %}<section class="card"><h3>Reportes congelados</h3>{% for frozen in frozen_reports %}<article><h4>Reporte r{{ frozen.pk }} · {{ frozen.payload.runs|length }} corridas</h4><p>Creado {{ frozen.created }} · snapshot {{ frozen.payload.snapshot_revision_id|default:'sin seleccionar' }}</p><div class="actions"><a href="{% url 'frozen-study-report' frozen.pk 'html' %}">Reporte HTML</a><a href="{% url 'frozen-study-report' frozen.pk 'csv' %}">CSV</a><a href="{% url 'frozen-study-report' frozen.pk 'json' %}">Manifiesto JSON</a><a href="{% url 'frozen-study-bundle' frozen.pk %}">Paquete ZIP</a></div></article>{% endfor %}</section>{% endif %}
+<p>Reportes actuales por estudio: <a href="{% url 'aggregate-report' study.pk 'html' %}">HTML</a> · <a href="{% url 'aggregate-report' study.pk 'csv' %}">CSV</a> · <a href="{% url 'aggregate-report' study.pk 'json' %}">JSON</a></p>{% for job in completed %}<section class="card"><h3>{{ job.result.model }} · {{ job.pk }}</h3><div class="actions"><a href="{% url 'report' job.pk 'html' %}">Reporte HTML</a><a href="{% url 'report' job.pk 'csv' %}">Predicciones CSV</a><a href="{% url 'report' job.pk 'json' %}">Manifiesto JSON</a></div></section>{% empty %}<p>Los reportes estarán disponibles al completar una ejecución.</p>{% endfor %}
+{% elif section == 'lineage' %}
+<section class="card"><h3>Trazabilidad del estudio</h3><p>Los enlaces solo muestran relaciones guardadas. Una ausencia histórica se indica explícitamente.</p><ol class="lineage">{% for node in lineage %}<li><article class="card"><h4>{% if node.kind == 'plan' %}Dataset / plan{% else %}{{ node.kind|capfirst }}{% endif %} · revisión {{ node.revision.pk }}</h4><p>{{ node.revision.created }} · {% if node.parent %}deriva de revisión {{ node.parent }}{% else %}origen inicial{% endif %}</p><details><summary>Configuración y artefactos</summary><pre>{{ node.revision.payload }}</pre></details>{% for job in node.jobs %}<p>Ejecución <a href="{% url 'page' study.pk 'jobs' %}">{{ job.pk }}</a> · {{ job.status }}{% if job.status == 'completed' %} · {{ job.result.model }} · fingerprint {{ job.result.data_fingerprint }} · <a href="{% url 'page' study.pk 'evidence' %}?job={{ job.pk }}">evidencia</a>{% endif %}</p>{% empty %}<p class="muted">No hay ejecución vinculada a esta revisión.</p>{% endfor %}</article></li>{% empty %}<li>Sin revisiones registradas.</li>{% endfor %}</ol></section>
+{% elif section == 'history' %}
+{% for revision in revisions %}<section class="card"><h3>Revisión {{ revision.pk }} · {{ revision.kind }}</h3><p>{{ revision.created }} · origen {{ revision.parent_id|default:'inicial' }}</p><details><summary>Contenido</summary><pre>{{ revision.payload }}</pre></details>{% if revision.kind == 'plan' or revision.kind == 'snapshot' %}<form method="post" action="{% url 'revise' revision.pk %}">{% csrf_token %}<button>Recuperar como nueva revisión</button></form>{% endif %}</section>{% empty %}<p>Sin revisiones.</p>{% endfor %}
+{% endif %}
+<details class="card"><summary>Asistencia opcional</summary><p>Proveedor simulado disponible para probar el contrato. No se envían datos a servicios externos.</p><button type="button" id="assistant-toggle">Activar ayuda local</button><div id="assistant-text" hidden><p>Revisá las particiones y las capacidades del modelo antes de ejecutar. Las correcciones crean revisiones; no reemplazan las predicciones guardadas.</p><form method="post" action="{% url 'assistant' study.pk %}">{% csrf_token %}<button>Solicitar propuesta simulada</button></form></div></details>
+<script>document.getElementById('assistant-toggle').onclick=()=>{const text=document.getElementById('assistant-text');text.hidden=!text.hidden;document.getElementById('assistant-toggle').textContent=text.hidden?'Activar ayuda local':'Desactivar ayuda local'};</script>
+<script>
+(() => {
+  const form = document.getElementById('snapshot-form');
+  const stateNode = document.getElementById('restored-visual-state');
+  if (!form) return;
+  let state = {};
+  try { state = JSON.parse(stateNode?.textContent || '{}'); } catch (error) {}
+  const cursor = document.getElementById('cursor');
+  const reviewFilter = document.getElementById('pose-preview-review-filter');
+  const poseSession = document.getElementById('pose-preview-session');
+  const poseBodyparts = document.getElementById('pose-preview-bodyparts');
+  const allPoseBodyparts = document.getElementById('pose-preview-all-bodyparts');
+  const poseBodypartsSummary = document.getElementById('pose-preview-bodyparts-summary');
+  const poseFrame = document.getElementById('pose-preview-frame');
+  if (cursor && Number.isInteger(state.cursor)) {
+    cursor.value = String(Math.min(+cursor.max, Math.max(+cursor.min, state.cursor)));
+  }
+  if (Array.isArray(state.selected_jobs)) {
+    document.querySelectorAll('input[name="jobs"]').forEach(input => {
+      input.checked = state.selected_jobs.includes(input.value);
+    });
+    const compareRuns = document.getElementById('comparison-jobs');
+    if (compareRuns) [...compareRuns.options].forEach(option => {
+      option.selected = state.selected_jobs.includes(option.value);
+    });
+  }
+  if (Array.isArray(state.open_panels)) {
+    document.querySelectorAll('details').forEach((panel, index) => {
+      panel.open = state.open_panels.includes(index);
+    });
+  }
+  const savedFilter = state.filters?.pose_timeline;
+  if (reviewFilter && typeof savedFilter === 'string'
+      && [...reviewFilter.options].some(option => option.value === savedFilter)) {
+    reviewFilter.value = savedFilter;
+  }
+  const savedPoseTimeline = state.pose_timeline;
+  if (poseSession && typeof savedPoseTimeline?.session_id === 'string'
+      && [...poseSession.options].some(option => option.value === savedPoseTimeline.session_id)) {
+    poseSession.value = savedPoseTimeline.session_id;
+    poseSession.dispatchEvent(new Event('change'));
+  }
+  if (poseBodyparts) {
+    const savedParts = Array.isArray(savedPoseTimeline?.bodyparts)
+      ? savedPoseTimeline.bodyparts
+      : typeof savedPoseTimeline?.bodypart === 'string' ? [savedPoseTimeline.bodypart] : null;
+    if (savedParts) {
+      const checks = [...poseBodyparts.querySelectorAll('input[data-bodypart]')];
+      checks.forEach(input => { input.checked = savedParts.includes(input.dataset.bodypart); });
+      const selected = checks.filter(input => input.checked);
+      allPoseBodyparts.checked = selected.length === checks.length;
+      allPoseBodyparts.indeterminate = selected.length > 0 && selected.length < checks.length;
+      poseBodypartsSummary.textContent = `Elegir partes · ${selected.length} graficadas`;
+      poseBodyparts.querySelector('input[data-bodypart]')?.dispatchEvent(new Event('change'));
+    }
+  }
+  if (poseFrame && Number.isInteger(savedPoseTimeline?.frame)
+      && savedPoseTimeline.frame >= 0) {
+    poseFrame.value = String(Math.min(Number(poseFrame.max) || savedPoseTimeline.frame,
+      savedPoseTimeline.frame));
+    poseFrame.dispatchEvent(new Event('input'));
+  }
+  form.addEventListener('submit', () => {
+    const selected = [...document.querySelectorAll('input[name="jobs"]:checked')]
+      .map(input => input.value);
+    const selectedPredictions = [
+      ...document.querySelectorAll('#pose-prediction-selection input[name="predictions"]:checked'),
+    ].map(input => input.value);
+    state.section = document.querySelector('#snapshot-form input[name="section"]').value;
+    const comparisonSelected = [
+      ...(document.querySelector('#comparison-jobs')?.selectedOptions || []),
+    ].map(option => option.value);
+    state.selected_jobs = comparisonSelected.length ? comparisonSelected
+      : selected.length ? selected
+        : (document.querySelector('#evidence-kind')
+          ? ['{{ selected.pk|default:"" }}'].filter(Boolean) : []);
+    state.selected_predictions = selectedPredictions;
+    if (reviewFilter) {
+      const filters = state.filters && typeof state.filters === 'object'
+        && !Array.isArray(state.filters) ? state.filters : {};
+      state.filters = {...filters, pose_timeline: reviewFilter.value};
+    }
+    if (poseSession && poseBodyparts && poseFrame) {
+      state.pose_timeline = {
+        session_id: poseSession.value,
+        bodyparts: [...poseBodyparts.querySelectorAll('input[data-bodypart]:checked')]
+          .map(input => input.dataset.bodypart),
+        frame: Number(poseFrame.value),
+      };
+    }
+    if (cursor) state.cursor = Number(cursor.value);
+    state.open_panels = [...document.querySelectorAll('details')]
+      .flatMap((panel, index) => panel.open ? [index] : []);
+    document.getElementById('snapshot-state').value = JSON.stringify(state);
+  });
+})();
+</script>
+<script>document.getElementById('cursor')?.dispatchEvent(new Event('input'));</script>
+{% endblock %}

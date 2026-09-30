@@ -1,0 +1,265 @@
+# Componentes reales en STORM Studio
+
+Esta guía corrige la relación entre el estudio visual y el motor actual de
+STORM. El editor no inventa una plataforma paralela: debe configurar y conectar
+los contratos que ya existen en `storm`, y mostrar claramente qué capacidades
+son propuestas futuras.
+
+## Qué existe hoy
+
+El runtime actual tiene este recorrido:
+
+```text
+DataRef
+  ↓ DataLoader o PipelineDataLoader
+Dataset(inputs, targets, metadata)
+  ↓ Study
+RunEngine.train()
+  ├─ ModelRegistry.build(model_type, model_config)
+  ├─ model.fit(inputs, targets)
+  ├─ model.predict(inputs) → ModelOutput
+  ├─ MetricRegistry.get(name).evaluate(...)
+  └─ ArtifactStore.save(model, output, RunRecord)
+```
+
+El estudio visual debe representar ese recorrido. `StudySpec`, `RunSpec`,
+`DataRef`, `StepSpec` y `PipelineSpec` se guardan como configuración. Los
+modelos, loaders, métricas y stores son objetos de runtime que se inyectan al
+crear `Study`.
+
+El `RunEngine` implementado ejecuta entrenamiento seguido de predicción y
+métricas sobre el `Dataset` recibido. Todavía no hay métodos separados
+`evaluate`, `infer`, `SearchStrategy`, `PretrainedModelLoader`, recuperación de
+checkpoints ni persistencia de ejecuciones fallidas. Studio debe mostrar estas
+capacidades como no disponibles hasta que se agreguen sus contratos.
+
+## Catálogo de componentes y registros
+
+### Pasos y visualizaciones
+
+Son clases abstractas descubribles por reflexión:
+
+```python
+steps = StepRegistry()
+steps.discover("rainstorm.integration.steps")
+
+views = VisualizationRegistry()
+views.discover("rainstorm.integration.visualizations")
+```
+
+El discovery importa recursivamente solamente el paquete habilitado y encuentra
+subclases concretas de `PipelineStep` o `Visualization`. No se ejecuta al
+importar STORM ni acepta paquetes arbitrarios enviados desde el navegador.
+
+### Modelos
+
+`ModelRegistry` usa builders explícitos. Un modelo existente se registra así:
+
+```python
+from storm import ModelOutput, ModelRegistry
+
+
+class ExistingModelAdapter:
+    def __init__(self, backend):
+        self.backend = backend
+
+    def fit(self, inputs, targets=None):
+        self.backend.fit(inputs, targets)
+        return self
+
+    def predict(self, inputs):
+        native = self.backend.predict(inputs)
+        return ModelOutput(
+            predictions=native,
+            metadata={"adapter": type(self).__name__},
+        )
+
+
+def build_existing(config):
+    from external_library import Estimator
+
+    return ExistingModelAdapter(Estimator(**config))
+
+
+models = ModelRegistry()
+models.register("external.estimator", build_existing)
+```
+
+El builder recibe únicamente `model_config`, crea una instancia nueva y deja los
+imports pesados dentro del plugin. Studio debe listar `external.estimator` a
+partir del catálogo que el plugin entrega junto al registro. En el código actual
+`ModelRegistry` no expone todavía un `available` público ni un descriptor de
+formulario; esa es una extensión pendiente del adaptador de catálogo, no un
+motivo para leer `_builders` desde la UI.
+
+Un modelo ya implementado en RAINSTORM sigue el mismo patrón:
+
+```python
+def register_rainstorm_models(models):
+    models.register("rainstorm.vame", build_vame_adapter)
+    models.register("rainstorm.kpms", build_kpms_adapter)
+```
+
+El adapter traduce la salida nativa a `ModelOutput`. STORM no importa VAME,
+Keypoint-MoSeq, pose ni ROI. El plugin RAINSTORM conserva sus configuraciones,
+loaders y dependencias.
+
+### Métricas
+
+Una métrica implementa `evaluate(dataset, output, model)` y devuelve un escalar:
+
+```python
+class DomainAgreement:
+    def evaluate(self, *, dataset, output, model):
+        return agreement(dataset.targets, output.predictions)
+
+
+metrics = MetricRegistry()
+metrics.register("rainstorm.domain_agreement", DomainAgreement())
+```
+
+No asumir que cada modelo produce labels, embeddings o estados. Las métricas
+conductuales se registran desde RAINSTORM. `accuracy`, `mae` y `mse` son las
+métricas clásicas incluidas en STORM.
+
+### Artefactos y recuperación
+
+`FileArtifactStore` persiste referencias de modelos, outputs y `RunRecord` con
+manifiestos y SHA-256. `RunResult` permite recuperar el modelo y la salida:
+
+```python
+model = result.load_model()
+output = result.load_output()
+```
+
+Eso es recuperación de artefactos y resultados. No equivale a reanudar una
+ejecución desde un checkpoint: esa capacidad todavía requiere un contrato de
+checkpoint y soporte del adapter. Studio debe diferenciar las acciones «Cargar
+modelo», «Abrir output», «Restaurar estado visual» y «Reanudar entrenamiento».
+
+## Cómo cargar inputs sin ocultar el dominio
+
+La frontera de entrada es `DataRef` → `Dataset`. El lector conoce el formato y
+el plugin conoce la preparación:
+
+```python
+from storm import DataRef, Dataset, PipelineDataLoader
+
+
+def read_application_data(reference: DataRef) -> Dataset:
+    raw = repository.load(reference.identifier)
+    return Dataset(
+        inputs=raw.inputs,
+        targets=raw.targets,
+        metadata={"source": reference.identifier},
+    )
+
+
+loader = PipelineDataLoader(
+    loader=read_application_data,
+    runner=pipeline_runner,
+)
+```
+
+Para RAINSTORM, `read_application_data` puede usar DLC, video, archivos de pose
+o ROI, pero vive en RAINSTORM. Studio configura el `DataRef`, muestra metadata y
+una previsualización limitada cuando el conector la ofrece. El navegador no
+lee rutas arbitrarias ni ejecuta imports indicados por el documento.
+
+El asistente de conectores guía la creación de este código mediante un formulario:
+
+1. seleccionar formato o API;
+2. indicar ubicación como referencia de workspace;
+3. mapear inputs, targets y metadata;
+4. declarar fingerprint y requisitos;
+5. probar con una muestra;
+6. revisar un diff de código y tests;
+7. registrar el loader con aprobación explícita.
+
+La asistencia puede generar un esqueleto, pero **no inventa un modelo**, no
+ejecuta código nuevo, no instala dependencias ni registra un conector sin una
+revisión humana. Si el formato es desconocido, debe marcar el conector como
+incompleto y explicar qué contrato falta.
+
+## Cómo incluir código existente
+
+Hay tres formas, con diferente grado de integración:
+
+| Caso | Adaptación | Registro |
+|---|---|---|
+| clase Python que ya cumple `fit`/`predict` | builder que la instancia y normaliza output | `ModelRegistry.register` |
+| biblioteca externa | adapter + dependencia opcional + tests | builder con import local |
+| código que necesita pipeline | `PipelineStep` que transforma `PipelineContext` | `StepRegistry.discover` o `register` |
+
+El asistente de inclusión debe pedir el módulo, clase, constructor, configuración,
+entrada/salida, versión y dependencia. Genera un adapter inicial como archivo
+revisable. La integración se considera disponible solo después de que pasen los
+tests de contrato: `fit`, `predict`, `ModelOutput`, serialización del modelo y
+paridad con una salida nativa conocida.
+
+Código ilustrativo de una integración RAINSTORM:
+
+```python
+def build_rainstorm_model(config):
+    from rainstorm_adapter import RainstormBackend
+
+    return RainstormModelAdapter(RainstormBackend(**config))
+
+
+def register_rainstorm_components(models, metrics, steps, visualizations):
+    models.register("rainstorm.behavior", build_rainstorm_model)
+    metrics.register("rainstorm.behavior_score", BehaviorScore())
+    steps.discover("rainstorm.integration.steps")
+    visualizations.discover("rainstorm.integration.visualizations")
+```
+
+La composición se ejecuta al iniciar el runtime, no dentro del core de STORM.
+
+## Comparar modelos en el estudio visual
+
+La comparación parte de `StudyResults` y sus `RunResult`. Para cada corrida se
+puede mostrar `RunRecord`: `run_id`, `execution_id`, `model_type`, `data_ref`,
+`spec_fingerprint`, seed, métricas, timestamps y referencias de artefactos.
+
+Una comparación debe verificar antes de ordenar: fingerprint de datos, versión
+de pipeline, partición, versión de etiquetas y definición/dirección de métricas.
+Si difieren, Studio permite inspección lado a lado, pero no presenta un ranking
+como si fuera equivalente. Las visualizaciones se generan con
+`VisualizationRequest`; no modifican la corrida ni el plan.
+
+## Asistencia LLM dentro del estudio visual
+
+El LLM es un proveedor opcional de propuestas de interfaz. Puede:
+
+- explicar un contrato o error de validación;
+- proponer un adapter de modelo o conector;
+- sugerir configuración a partir de un schema;
+- resumir diferencias entre corridas;
+- proponer etiquetas para revisión humana.
+
+No puede ejecutar un plan, aceptar etiquetas, cambiar un `RunSpec`, instalar
+paquetes o acceder a datos fuera del contexto autorizado. El usuario debe ver
+qué contexto se envía, proveedor, modelo, modo local/remoto y costo/estado.
+Desactivarlo deja disponibles edición manual, validación, comparación y
+recuperación. Una propuesta aceptada que cambia datos, labels o configuración
+crea una nueva revisión con diff y fingerprint.
+
+## Qué debe implementar Studio después
+
+| Necesidad visual | Base STORM disponible | Extensión pendiente |
+|---|---|---|
+| listar modelos existentes | `ModelRegistry.register` | catálogo público con descriptors |
+| configurar modelos | `RunSpec.model_type/model_config` | JSON Schema de formularios |
+| cargar inputs | `DataRef`, `Dataset`, `DataLoader` | wizard y previsualización segura |
+| preparar datos | `PipelineSpec`, `PipelineRunner`, `PipelineDataLoader` | puertos, schemas y validación visual |
+| ejecutar estudio | `Study`, `RunEngine` | API web, worker y eventos |
+| comparar modelos | `StudyResults`, `RunRecord` | vista comparativa y reglas de comparabilidad |
+| recuperar modelo/output | `RunResult`, `ArtifactStore` | explorador de artefactos |
+| reanudar checkpoint | no disponible | contrato y adapter de checkpoints |
+| ayuda para código | contratos públicos | generador de adapter + diff + tests |
+| etiquetas asistidas | no hay contrato universal | `AnnotationRevision` en Studio/plugin |
+| LLM opt-in | no hay proveedor en core | `AssistantProvider` aislado y auditable |
+
+Esta tabla es la frontera de implementación. La UI puede anticipar controles
+para capacidades futuras, pero debe deshabilitarlos con una explicación concreta
+hasta que exista el contrato correspondiente.

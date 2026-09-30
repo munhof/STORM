@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STORM Studio · Evidencia temporal</title>
+  <style>
+    :root { --ink:#0f172a; --muted:#475569; --line:#dbe4ee; --blue:#1d4ed8; --surface:#fff; --bg:#f8fafc; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+    header { height:70px; display:flex; align-items:center; gap:28px; padding:0 28px; background:var(--surface); border-bottom:1px solid var(--line); }
+    header strong { font-size:23px; letter-spacing:-.03em; } header span { color:var(--muted); font-size:16px; }
+    .badge { margin-left:auto; padding:7px 12px; border-radius:999px; background:#dbeafe; color:#1e40af; font-weight:700; font-size:12px; }
+    main { max-width:1440px; margin:0 auto; padding:24px; }
+    .toolbar, .card { background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 8px #0f172a08; }
+    .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 16px; margin-bottom:18px; }
+    button, select { height:36px; border:1px solid #cbd5e1; border-radius:8px; padding:0 12px; background:#fff; color:var(--ink); font:inherit; cursor:pointer; }
+    button.primary { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:700; }
+    label { color:var(--muted); font-weight:600; } .toolbar .source { margin-right:auto; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .card { padding:20px; min-height:340px; } h2 { margin:0 0 4px; font-size:20px; } h3 { margin:20px 0 8px; font-size:15px; }
+    .sub { color:var(--muted); margin:0 0 16px; } svg { width:100%; height:auto; display:block; background:#fff; border-radius:8px; }
+    .legend { display:flex; gap:14px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin-top:12px; }
+    .dot { width:11px; height:11px; display:inline-block; border-radius:3px; vertical-align:-1px; margin-right:4px; }
+    .timeline-card { grid-column:1 / -1; min-height:220px; } .timeline { position:relative; height:84px; margin:22px 18px 8px; border-bottom:1px solid #94a3b8; }
+    .track { position:absolute; left:0; right:0; height:29px; top:5px; display:flex; border-radius:6px; overflow:hidden; }
+    .segment { display:flex; align-items:center; padding-left:8px; min-width:0; font-size:12px; color:#0f172a; border-right:1px solid #fff8; }
+    .cursor { position:absolute; top:-10px; bottom:-14px; width:3px; background:#dc2626; transition:left .15s; }
+    .cursor::after { content:""; position:absolute; top:-5px; left:-5px; width:13px; height:13px; border-radius:50%; background:#dc2626; }
+    input[type=range] { width:100%; accent-color:var(--blue); } .status { color:var(--muted); font-size:13px; }
+    .detail { display:flex; gap:24px; flex-wrap:wrap; margin-top:12px; color:var(--muted); } .detail strong { color:var(--ink); }
+    .tabbar { max-width:1440px; margin:0 auto; padding:16px 24px 0; display:flex; gap:8px; }
+    .tab { border:0; border-radius:8px 8px 0 0; background:transparent; color:var(--muted); font-weight:700; }
+    .tab.active { background:#dbeafe; color:#1d4ed8; }
+    .panel { display:none; } .panel.active { display:block; }
+    .flow-grid, .compare-grid, .labels-grid, .history-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .wide { grid-column:1 / -1; } .node-list { display:grid; gap:10px; margin-top:15px; }
+    .node { display:flex; align-items:center; gap:12px; padding:13px; border:1px solid var(--line); border-radius:9px; background:#f8fafc; }
+    .node strong { min-width:125px; } .node small { color:var(--muted); } .port { margin-left:auto; color:#16a34a; font-size:12px; font-weight:700; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; } th, td { text-align:left; padding:12px 10px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-size:12px; }
+    .state { display:inline-block; padding:4px 8px; border-radius:999px; background:#dcfce7; color:#166534; font-size:12px; font-weight:700; }
+    .state.pending { background:#fef3c7; color:#92400e; } .assistant { border-left:4px solid #8b5cf6; background:#f5f3ff; padding:14px; border-radius:8px; color:#4c1d95; }
+    .stepper { display:flex; gap:8px; margin:12px 0 20px; } .step { flex:1; padding:10px; border-radius:8px; background:#f1f5f9; color:var(--muted); text-align:center; font-size:12px; } .step.current { background:#dbeafe; color:#1d4ed8; font-weight:700; }
+    @media (max-width:900px) { .grid { grid-template-columns:1fr; } .timeline-card { grid-column:auto; } header span { display:none; } }
+  </style>
+</head>
+<body>
+  <header><strong>STORM Studio</strong><span>/ Estudio visual de comportamiento</span><span class="badge">DEMO LOCAL · RAINSTORM PLUGIN</span></header>
+  <nav class="tabbar" aria-label="Pestañas del estudio visual">
+    <button class="tab" data-tab="flow">Flujo</button>
+    <button class="tab" data-tab="compare">Comparar</button>
+    <button class="tab" data-tab="labels">Etiquetas</button>
+    <button class="tab active" data-tab="evidence">Evidencia</button>
+    <button class="tab" data-tab="history">Historial</button>
+  </nav>
+  <main>
+    <section id="flow-panel" class="panel">
+      <div class="flow-grid">
+        <article class="card wide"><h2>Flujo del estudio</h2><p class="sub">Configuración ejecutable: datos, preparación, modelo y métricas.</p><div class="node-list"><div class="node"><strong>① Datos</strong><small>pose_prepared_v3 · DataLoader</small><span class="port">válido</span></div><div class="node"><strong>② Preparación</strong><small>PipelineDataLoader · 3 pasos</small><span class="port">válido</span></div><div class="node"><strong>③ Modelo</strong><small>VAME · adapter registrado</small><span class="port">válido</span></div><div class="node"><strong>④ Métricas</strong><small>accuracy · segment_f1 · duración</small><span class="port">válido</span></div></div><button class="primary" style="margin-top:18px">Validar y ejecutar plan</button></article>
+        <article class="card"><h2>Inspector</h2><p class="sub">Modelo seleccionado</p><label>Tipo</label><p><strong>rainstorm.vame</strong></p><label>Configuración</label><p class="status">n_components: 10<br>window_size: 30<br>seed: 42</p><button>Editar adapter</button></article>
+        <article class="card"><h2>Trazabilidad</h2><p class="sub">Referencias que acompañan la ejecución.</p><table><tr><th>Elemento</th><th>Referencia</th></tr><tr><td>Datos</td><td>sha256: 8f2…</td></tr><tr><td>Pipeline</td><td>pipeline-017</td></tr><tr><td>Modelo</td><td>run-042</td></tr><tr><td>Artefactos</td><td>FileArtifactStore</td></tr></table></article>
+      </div>
+    </section>
+    <section id="compare-panel" class="panel">
+      <div class="compare-grid">
+        <article class="card wide"><h2>Comparar modelos</h2><p class="sub">Misma fuente, partición, etiquetas y métricas.</p><table><tr><th>Modelo / ejecución</th><th>Accuracy</th><th>F1</th><th>Estado</th><th></th></tr><tr><td><strong>VAME · run-042</strong></td><td>0.91</td><td>0.84</td><td><span class="state">compatible</span></td><td><button>Ver evidencia</button></td></tr><tr><td>Baseline · run-039</td><td>0.76</td><td>0.68</td><td><span class="state">compatible</span></td><td><button>Ver evidencia</button></td></tr></table><p class="status">La comparación conserva predicciones, configuración, semillas y artefactos.</p></article>
+        <article class="card"><h2>Diferencias</h2><p class="sub">Inspección lado a lado</p><div class="assistant">3 desacuerdos en el intervalo seleccionado.<br><strong>Acción:</strong> abrir Evidencia para localizar los frames.</div><button style="margin-top:16px">Abrir en Evidencia</button></article>
+        <article class="card"><h2>Métricas</h2><p class="sub">Dirección declarada por métrica</p><table><tr><td>Accuracy ↑</td><td>VAME 0.91</td></tr><tr><td>F1 ↑</td><td>VAME 0.84</td></tr><tr><td>Duración ↓</td><td>Baseline 4.2 s</td></tr></table></article>
+      </div>
+    </section>
+    <section id="labels-panel" class="panel">
+      <div class="labels-grid">
+        <article class="card wide"><h2>Revisión de etiquetas</h2><p class="sub">Las propuestas no reemplazan automáticamente las decisiones humanas.</p><table><tr><th>Elemento</th><th>Etiqueta actual</th><th>Sugerencia</th><th>Origen</th><th>Estado</th><th></th></tr><tr><td>Frame 01842</td><td>Exploración</td><td>Interacción</td><td>VAME · 0.81</td><td><span class="state pending">pendiente</span></td><td><button>Aceptar</button></td></tr><tr><td>Frame 01843</td><td>Sin etiqueta</td><td>Interacción</td><td>Regla geométrica</td><td><span class="state pending">pendiente</span></td><td><button>Editar</button></td></tr></table></article>
+        <article class="card"><h2>Taxonomía</h2><p class="sub">Comportamiento · versión 3</p><div class="node-list"><div class="node"><strong>Exploración</strong><span class="port">12.4 k</span></div><div class="node"><strong>Interacción</strong><span class="port">4.8 k</span></div><div class="node"><strong>Grooming</strong><span class="port">1.9 k</span></div></div></article>
+        <article class="card"><h2>Asistencia LLM</h2><p class="sub">Opcional y desactivada por defecto.</p><label><input type="checkbox" id="llm-toggle"> Activar asistencia</label><div class="assistant" style="margin-top:14px">Puede sugerir etiquetas o explicar desacuerdos. Toda propuesta requiere revisión humana.</div></article>
+      </div>
+    </section>
+    <section id="evidence-panel" class="panel active">
+    <section class="toolbar" aria-label="Controles del estudio">
+      <span class="source"><strong>demo-session-018</strong> · 12.40–18.20 s · fuente pose_prepared_v3</span>
+      <label for="model-select">Modelo</label>
+      <select id="model-select"><option value="vame">VAME · run-042</option><option value="baseline">Baseline · run-039</option></select>
+      <button id="play-button" class="primary">▶ Reproducir</button>
+      <button id="compare-button">Comparar modelo</button>
+    </section>
+    <section class="grid">
+      <article class="card"><h2>Datos crudos</h2><p class="sub">Señal/posición recibida del adaptador · cursor sincronizado</p><svg id="raw-chart" viewBox="0 0 640 270" role="img" aria-label="Serie cruda"></svg><div class="detail"><span>Frame <strong id="frame-value">01842</strong></span><span>Timestamp <strong id="time-value">15.72 s</strong></span><span>Origen <strong>PipelineDataLoader</strong></span></div></article>
+      <article class="card"><h2>Clasificación</h2><p class="sub">ModelOutput alineado con la misma observación temporal</p><svg id="classification-track" viewBox="0 0 640 270" role="img" aria-label="Clasificación del modelo"></svg><div class="legend"><span><i class="dot" style="background:#dcfce7"></i>Exploración</span><span><i class="dot" style="background:#fef3c7"></i>Interacción</span><span><i class="dot" style="background:#fce7f3"></i>Grooming</span><span><i class="dot" style="background:#dbeafe"></i>Etiqueta humana</span></div></article>
+      <article class="card timeline-card"><h2>Timeline</h2><p class="sub">Arrastrá el cursor para ver qué sucede en el dato crudo cuando cambia la clasificación.</p><div class="timeline"><div id="timeline-track" class="track"></div><div id="cursor" class="cursor" style="left:0"></div></div><input id="timeline" type="range" min="0" max="5" value="2" aria-label="Muestra temporal"><div class="status" id="status">Alineación: frame ✓ · pérdidas: 0 · downsampling: ×1 · selección: índice 2</div></article>
+    </section>
+    </section>
+    <section id="history-panel" class="panel">
+      <div class="history-grid">
+        <article class="card wide"><h2>Historial y estados</h2><p class="sub">Recuperá el estudio visual sin borrar revisiones anteriores.</p><table><tr><th>Revisión</th><th>Fecha</th><th>Cambio</th><th>Estado</th><th></th></tr><tr><td><strong>Revisión 7</strong></td><td>Ahora</td><td>Comparación VAME/Baseline</td><td><span class="state">actual</span></td><td><button>Guardar snapshot</button></td></tr><tr><td>Revisión 6</td><td>19/09/2026</td><td>Etiquetas humanas actualizadas</td><td><span class="state pending">anterior</span></td><td><button>Recuperar</button></td></tr><tr><td>Revisión 5</td><td>18/09/2026</td><td>Plan ejecutado · run-042</td><td><span class="state pending">anterior</span></td><td><button>Ver diferencias</button></td></tr></table></article>
+        <article class="card"><h2>Recuperación</h2><p class="sub">Separación explícita de estados.</p><div class="node-list"><div class="node"><strong>Estado visual</strong><small>filtros y paneles</small></div><div class="node"><strong>Artefactos</strong><small>modelo y output</small></div><div class="node"><strong>Checkpoint</strong><small>requiere adapter</small></div></div></article>
+        <article class="card"><h2>Asistencia LLM</h2><p class="sub">Preferencia del workspace</p><label><input type="checkbox"> Activada para este estudio</label><p class="status" style="margin-top:14px">Las respuestas tardías no modifican revisiones automáticamente.</p></article>
+      </div>
+    </section>
+  </main>
+  <script>
+    const raw = [1, 2.5, 2, 4, 3, 1.5];
+    const models = { vame: ['Exploración','Exploración','Interacción','Interacción','Grooming','Grooming'], baseline: ['Exploración','Interacción','Interacción','Grooming','Grooming','Exploración'] };
+    const colors = { Exploración:'#dcfce7', Interacción:'#fef3c7', Grooming:'#fce7f3' };
+    const human = ['Exploración','Exploración','Etiqueta humana','Interacción','Grooming','Grooming'];
+    const ns = 'http://www.w3.org/2000/svg'; const $ = id => document.getElementById(id);
+    function el(tag, attrs={}) { const node = document.createElementNS(ns, tag); Object.entries(attrs).forEach(([k,v]) => node.setAttribute(k,v)); return node; }
+    function drawRaw(selected) { const svg=$('raw-chart'); svg.replaceChildren(); svg.append(el('rect',{x:0,y:0,width:640,height:270,fill:'#f8fafc'})); const pts=raw.map((v,i)=>`${35+i*114},${225-v*42}`).join(' '); svg.append(el('polyline',{points:pts,fill:'none',stroke:'#0369a1','stroke-width':4})); raw.forEach((v,i)=>svg.append(el('circle',{cx:35+i*114,cy:225-v*42,r:i===selected?8:5,fill:i===selected?'#dc2626':'#0369a1'}))); const line=el('line',{x1:35+selected*114,x2:35+selected*114,y1:25,y2:240,stroke:'#dc2626','stroke-width':2}); svg.append(line); }
+    function drawClassification(selected) { const svg=$('classification-track'); svg.replaceChildren(); svg.append(el('rect',{x:0,y:0,width:640,height:270,fill:'#f8fafc'})); const labels=models[$('model-select').value]; labels.forEach((label,i)=>{ const x=15+i*103; svg.append(el('rect',{x,y:70,width:101,height:78,rx:6,fill:colors[label]})); const text=el('text',{x:x+8,y:113,'font-size':13,fill:'#0f172a'}); text.textContent=label; svg.append(text); const p=el('text',{x:x+8,y:135,'font-size':11,fill:'#475569'}); p.textContent=`p=${[.70,.72,.81,.84,.76,.79][i]}`; svg.append(p); }); const humanText=el('text',{x:15,y:205,'font-size':13,fill:'#475569'}); humanText.textContent='Etiqueta humana: '+human[selected]; svg.append(humanText); const line=el('line',{x1:15+selected*103,x2:15+selected*103,y1:35,y2:235,stroke:'#dc2626','stroke-width':3}); svg.append(line); }
+    function drawTimeline() { const track=$('timeline-track'); track.replaceChildren(); const labels=models[$('model-select').value]; labels.forEach(label=>{ const s=document.createElement('span'); s.className='segment'; s.style.width=`${100/labels.length}%`; s.style.background=colors[label]; s.textContent=label; track.append(s); }); }
+    function update() { const i=Number($('timeline').value); $('cursor').style.left=`${i/5*100}%`; $('frame-value').textContent=String(1840+i).padStart(5,'0'); $('time-value').textContent=(15.52+i*.1).toFixed(2)+' s'; $('status').textContent=`Alineación: frame ✓ · pérdidas: 0 · downsampling: ×1 · selección: índice ${i} · predicción: ${models[$('model-select').value][i]}`; drawRaw(i); drawClassification(i); drawTimeline(); }
+    let timer; $('timeline').addEventListener('input',update); $('model-select').addEventListener('change',update); $('compare-button').addEventListener('click',()=>alert('Comparación: se superpondrá el segundo modelo sobre el mismo intervalo.')); $('play-button').addEventListener('click',()=>{ if(timer){clearInterval(timer);timer=null;$('play-button').textContent='▶ Reproducir';return;} $('play-button').textContent='Ⅱ Pausar'; timer=setInterval(()=>{ const n=(Number($('timeline').value)+1)%6; $('timeline').value=n; update(); },700); });
+    document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.tab').forEach(item => item.classList.remove('active')); document.querySelectorAll('.panel').forEach(panel => panel.classList.remove('active')); button.classList.add('active'); $(button.dataset.tab+'-panel').classList.add('active'); }));
+    update();
+  </script>
+</body>
+</html>

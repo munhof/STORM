@@ -1,0 +1,109 @@
+{% if dataset_revision and dataset_revision.inventory.video_timeline %}
+<section class="card" aria-labelledby="video-timeline-heading">
+  <h3 id="video-timeline-heading">Continuidad y alineación del video</h3>
+  <p>Los saltos detectados dividen los segmentos para que las ventanas de preparación y los modelos temporales no crucen discontinuidades.</p>
+  <div class="table-scroll">
+    <table>
+      <caption>Frames y continuidad verificados al inspeccionar esta revisión de datos.</caption>
+      <thead>
+        <tr><th>Video</th><th>Sesión</th><th>Frames de video</th><th>FPS</th><th>Frames de pose</th><th>Continuidad</th><th>Saltos</th></tr>
+      </thead>
+      <tbody>
+        {% for video in dataset_revision.inventory.video_timeline %}
+        <tr>
+          <td>{{ video.file }}</td>
+          <td>{{ video.session_id }}</td>
+          <td>{{ video.frame_count|default_if_none:'—' }}</td>
+          <td>{{ video.fps|default_if_none:'—' }}</td>
+          <td>{{ video.pose_frame_count|default_if_none:'—' }}</td>
+          <td>
+            {% if video.discontinuity_status == 'verified_contiguous' %}Continua
+            {% elif video.discontinuity_status == 'gaps_detected' %}Saltos detectados
+            {% elif video.discontinuity_status == 'manual_boundaries_set' %}Límites manuales
+            {% else %}Sin verificar{% endif %}
+          </td>
+          <td>
+            {{ video.discontinuity_count }}
+            {% if video.discontinuities %}
+              <details><summary>Ver frames</summary>
+                <ul>{% for gap in video.discontinuities %}<li>Antes del frame {{ gap.before_frame }}{% if gap.delta_seconds %} · intervalo {{ gap.delta_seconds }} s{% else %} · límite manual{% endif %}</li>{% endfor %}</ul>
+                {% if video.discontinuity_count > 25 %}<small>Se muestran los primeros 25 saltos; todos dividen las ventanas del modelo.</small>{% endif %}
+              </details>
+            {% elif video.discontinuity_status == 'unknown_requires_review' %}
+              <small>Revisá el archivo antes de usar ventanas temporales.</small>
+            {% endif %}
+            {% if video.discontinuity_source == 'manual' and video.detected_discontinuities %}
+              <details><summary>Ver detección automática</summary>
+                <ul>{% for gap in video.detected_discontinuities %}<li>Antes del frame {{ gap.before_frame }} · intervalo {{ gap.delta_seconds }} s</li>{% endfor %}</ul>
+              </details>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if dataset_revision and dataset_revision.status == 'ready' and video_discontinuity_override_rows %}
+<section class="card" aria-labelledby="video-boundary-edit-heading">
+  <h3 id="video-boundary-edit-heading">Definir límites entre segmentos</h3>
+  <p>Ingresá números de frame del video, base 0, antes de los cuales empieza un segmento nuevo. Esta lista reemplaza los saltos automáticos para esa sesión; dejala vacía si no hay límites. Guardar crea una revisión nueva, vuelve a inspeccionar y conserva la anterior.</p>
+  <form method="post" action="{% url 'save-video-discontinuities' study.pk %}">
+    {% csrf_token %}
+    {% for row in video_discontinuity_override_rows %}
+    <label>Sesión {{ row.session_id }} · {{ row.files|join:', ' }}
+      <input name="boundaries_{{ forloop.counter0 }}" value="{{ row.boundaries_text }}" inputmode="numeric" aria-describedby="video-boundaries-help-{{ forloop.counter0 }}">
+    </label>
+    <small id="video-boundaries-help-{{ forloop.counter0 }}">
+      {% if row.frame_count %}Frames válidos entre 1 y {{ row.frame_count|add:'-1' }}.{% else %}El total de frames no se pudo verificar; revisá el video manualmente.{% endif %}
+    </small>
+    {% endfor %}
+    <label>Investigador <input name="reviewer" maxlength="160" required></label>
+    <label>Motivo del cambio <textarea name="reason" maxlength="2000" required></textarea></label>
+    <button>Guardar límites y volver a inspeccionar</button>
+  </form>
+</section>
+{% endif %}
+
+{% if dataset_revision and dataset_revision.status == 'ready' and video_timeline_review.required %}
+<section class="card" aria-labelledby="video-timeline-review-heading">
+  <h3 id="video-timeline-review-heading">Decisión del investigador</h3>
+  {% if video_timeline_review.has_gaps %}
+  <p>Revisá los saltos detectados. STORM ya los usa como límites entre segmentos y no crea ventanas temporales que los crucen.</p>
+  {% endif %}
+  {% if video_timeline_review.has_unknown %}
+  <p>Hay videos cuyos timestamps no se pudieron verificar. Si ingresaste límites manuales, se usarán esos; si no, aceptar implica tratarlos como continuos tras tu revisión.</p>
+  {% endif %}
+  {% if video_timeline_review.has_manual %}
+  <p>Los límites manuales que aparecen abajo reemplazan los saltos automáticos de esas sesiones. Confirmá que coinciden con la revisión del video.</p>
+  {% endif %}
+  <ul>
+    {% for item in video_timeline_review.items %}
+    <li><strong>{{ item.file }}</strong> · {{ item.session_id }} ·
+      {% if item.discontinuity_source == 'manual' %}
+        {{ item.discontinuities|length }} límites manuales: {% for gap in item.discontinuities %}antes del frame {{ gap.before_frame }}{% if not forloop.last %}, {% endif %}{% empty %}sin límites declarados{% endfor %}
+        {% if item.detected_discontinuities %}<details><summary>Ver detección automática</summary><ul>{% for gap in item.detected_discontinuities %}<li>Antes del frame {{ gap.before_frame }}</li>{% endfor %}</ul></details>{% endif %}
+      {% elif item.discontinuity_status == 'gaps_detected' %}
+        {{ item.discontinuities|length }} saltos: {% for gap in item.discontinuities %}antes del frame {{ gap.before_frame }}{% if not forloop.last %}, {% endif %}{% endfor %}
+      {% else %}timestamps sin verificar{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if video_timeline_review.accepted %}
+  <p role="status"><strong>Revisión guardada</strong> · {{ video_timeline_review.decision.payload.reviewer }} · revisión r{{ video_timeline_review.decision.payload.dataset_revision_id }} · {{ video_timeline_review.decision.created }}</p>
+  <p><strong>Motivo:</strong> {{ video_timeline_review.decision.payload.reason }}</p>
+  {% else %}
+  <p>La decisión se asocia a los hashes de video, sesiones, FPS y límites revisados. Si alguno cambia, se pedirá otra revisión. Preparar datos, previsualizar pasos o ejecutar un modelo queda bloqueado hasta guardarla.</p>
+  <form method="post" action="{% url 'review-video-timeline' study.pk %}">
+    {% csrf_token %}
+    <label>Investigador <input name="reviewer" maxlength="160" required></label>
+    <label>Motivo de la decisión <textarea name="reason" maxlength="2000" required></textarea></label>
+    <label><input type="checkbox" name="confirm_review" required>
+      Revisé la continuidad mostrada y confirmo esta decisión para el dataset.</label>
+    <button>Guardar revisión de continuidad</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}

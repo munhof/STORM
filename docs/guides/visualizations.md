@@ -121,6 +121,38 @@ Parámetros comunes: `width`, `height` y `title`. El histograma acepta `bins`.
 Los visualizadores validan entradas vacías, valores no numéricos y valores no
 finitos.
 
+## Evidencia temporal para modelos de comportamiento
+
+Un plugin de dominio puede usar el mismo contrato para mostrar el dato original
+junto con la salida del modelo. STORM no sabe si `request.data` es un video,
+una trayectoria o una señal; el plugin debe entregar una vista cruda y declarar
+su índice temporal en `request.metadata`. La salida debe conservar la relación
+entre observación y predicción.
+
+RAINSTORM puede registrar un visualizador como:
+
+```python
+class TemporalClassificationVisualization(Visualization):
+    visualization_type = "temporal_classification_overlay"
+
+    def render(self, request):
+        return VisualizationResult(
+            content=render_raw_with_labels(
+                request.data,
+                request.output,
+                request.metadata,
+            ),
+            media_type="image/svg+xml",
+            metadata={"alignment": "frame"},
+        )
+```
+
+La vista debe poder mostrar datos crudos, bandas de clasificación, etiquetas
+humanas, desacuerdos y un cursor sincronizado. Si no existe una alineación
+verificable por frame, timestamp o índice, debe devolver una tabla o advertencia,
+no superponer etiquetas de forma aproximada. Lectura de DLC, video, pose, ROI y
+la semántica de clases siguen siendo responsabilidad del adaptador RAINSTORM.
+
 ## Qué se rescata de `Tesis_Facu`
 
 El análisis encontró lógica reusable en barplots de métricas, heatmaps,

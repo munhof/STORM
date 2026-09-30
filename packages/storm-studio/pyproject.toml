@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "storm-studio"
+version = "0.1.0a0"
+requires-python = ">=3.11"
+license = "LGPL-3.0-or-later"
+dependencies = ["storm-traceable==0.1.0a0", "Django>=5.2,<5.3"]
+
+[project.scripts]
+storm-studio = "storm_studio.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/storm_studio"]

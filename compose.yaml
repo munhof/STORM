@@ -1,0 +1,41 @@
+services:
+  studio:
+    image: localhost/storm-studio-preview:dev
+    build:
+      context: .
+      dockerfile: Containerfile.studio
+    user: "1000:1000"
+    userns_mode: keep-id
+    environment:
+      STORM_WORKSPACE: /workspace/.storm
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /opt/storm/packages/storm-studio/src:/opt/storm/packages/storm-engine/src
+    volumes:
+      - ./.storm:/workspace/.storm:Z
+      - ./packages/storm-studio/src:/opt/storm/packages/storm-studio/src:ro,Z
+      - ./packages/storm-engine/src:/opt/storm/packages/storm-engine/src:ro,Z
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  worker:
+    image: localhost/storm-studio-preview:dev
+    user: "1000:1000"
+    userns_mode: keep-id
+    init: true
+    environment:
+      STORM_WORKSPACE: /workspace/.storm
+      STORM_CONTAINERIZED: "1"
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /opt/storm/packages/storm-studio/src:/opt/storm/packages/storm-engine/src
+    volumes:
+      - ./.storm:/workspace/.storm:Z
+      - ./packages/storm-studio/src:/opt/storm/packages/storm-studio/src:ro,Z
+      - ./packages/storm-engine/src:/opt/storm/packages/storm-engine/src:ro,Z
+    command:
+      - sh
+      - -c
+      - until storm-studio migrate --check >/dev/null 2>&1; do sleep 1; done; exec storm-studio worker --recover-stale
+    depends_on:
+      - studio
+    restart: unless-stopped

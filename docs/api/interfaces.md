@@ -226,3 +226,50 @@ No están disponibles para importar:
 La [guía de pipelines y pasos](../guides/pipelines-and-steps.md) y la
 [guía de visualizaciones](../guides/visualizations.md) describen las interfaces
 implementadas y los límites de sus extensiones.
+# Configuración declarada de componentes
+
+Los componentes registrados en `storm.suite` pueden declarar un esquema JSON
+pequeño y serializable. `Catalog.normalize(name, config)` es la operación común
+que usan el motor y los formularios de Studio; aplica defaults y devuelve una
+configuración nueva sin mutar la recibida.
+
+Se admiten `object`, `number`, `integer`, `string`, `boolean` y `array`, además
+de `required`, `enum`, `minimum` y `maximum`. Una propiedad también puede incluir
+`description`, un texto que Studio muestra como ayuda y que no cambia la
+validación. Los campos no declarados se rechazan. Un descriptor debe tener
+configuración de objeto; no se aceptan palabras clave o tipos desconocidos.
+`Catalog.validate` se conserva como atajo compatible y devuelve el descriptor
+después de validar.
+
+```python
+from storm.suite import Catalog, Component
+
+catalog = Catalog()
+catalog.register(Component(
+    "threshold",
+    ThresholdModel,
+    ("train", "infer"),
+    {
+        "type": "object",
+        "required": ["threshold"],
+        "properties": {
+            "threshold": {"type": "number", "minimum": 0, "default": 0.5},
+            "mode": {"type": "string", "enum": ["strict", "soft"]},
+        },
+    },
+))
+
+config = catalog.normalize("threshold", {"mode": "strict"})
+# {"mode": "strict", "threshold": 0.5}
+model = catalog.build("threshold", config)
+```
+
+La validación no sustituye las invariantes científicas del adaptador: por
+ejemplo, el modelo sigue siendo responsable de verificar que sus targets sean
+compatibles. La extensión del esquema a pasos, métricas y conectores está
+planificada en [E4](../planning/suite-completion.md).
+
+Los resultados de `storm.suite.execute` incluyen `alignment`, con los IDs de
+observación originales y los índices que corresponden a las predicciones
+devueltas. Si el dataset no declara `observation_ids`, el motor genera IDs
+basados en su posición. Los IDs declarados deben ser strings no vacíos y únicos.

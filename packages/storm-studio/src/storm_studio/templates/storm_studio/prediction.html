@@ -1,0 +1,1 @@
+{% extends 'storm_studio/base.html' %}{% block content %}<h1>Inferencia completada</h1><p>Modelo recuperado: {{ job.result.model }} · {{ job.pk }}</p><pre>{{ predictions }}</pre><p>Esta predicción se guardó como una nueva revisión de inferencia.</p><a href="{% url 'page' job.revision.study_id 'models' %}">Volver a modelos</a>{% endblock %}
