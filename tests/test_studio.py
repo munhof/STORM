@@ -215,7 +215,58 @@ def test_run_accepts_prepared_dataset_that_already_contains_required_model_steps
     response = client.post(f'/plans/{plan.pk}/run/')
 
     assert response.status_code == 302
-    assert Job.objects.filter(revision=plan, status='pending').exists()
+    job = Job.objects.get(revision=plan, status='pending')
+
+    captured = {}
+
+    def execute_prepared(spec, *args, **kwargs):
+        captured.update(spec)
+        return {'resolved_data': spec['data']}
+
+    from storm_studio import dataset_inventory
+    monkeypatch.setattr(dataset_inventory, 'connector_input', lambda *args, **kwargs: {
+        'inputs': [[[0.0], [1.0], [2.0]]], 'train': [0], 'test': [],
+    })
+    monkeypatch.setattr(services, 'execute', execute_prepared)
+    services.perform(job.pk)
+
+    assert captured['preapplied_steps'] == ['pose.temporal_windows']
+
+
+def test_execute_accepts_preapplied_steps_without_reapplying_pipeline(
+        client, tmp_path, monkeypatch):
+    from storm.pipeline import PipelineStep
+    from storm.suite import Component, default_catalog, execute
+    from storm.testing.models import IdentityModel
+
+    monkeypatch.setattr(
+        IdentityModel, 'required_pipeline_steps', ('pose.temporal_windows',),
+        raising=False)
+
+    class TemporalWindows(PipelineStep):
+        step_type = 'pose.temporal_windows'
+
+        def process(self, context):
+            pytest.fail('a materialized temporal-window step must not run again')
+
+    catalog = default_catalog()
+    catalog.steps.register(TemporalWindows)
+    catalog.register(Component('prepared_model', IdentityModel, ('train',), {
+        'type': 'object', 'properties': {},
+    }))
+
+    result = execute({
+        'model': 'prepared_model', 'connector': 'json_records', 'config': {},
+        'steps': [], 'preapplied_steps': ['pose.temporal_windows'], 'metrics': [],
+        'data': {
+            'inputs': [[[0.0], [1.0], [2.0]], [[1.0], [2.0], [3.0]]],
+            'targets': [0, 1], 'train': [0], 'test': [1],
+        },
+    }, tmp_path, 'prepared-model', catalog)
+
+    assert result['predictions'] == [[[1.0], [2.0], [3.0]]]
+    assert result['fitted_steps'] == []
+    assert result['spec']['preapplied_steps'] == ['pose.temporal_windows']
 
 
 def test_flow_can_load_a_registered_historical_recipe_preset(client, monkeypatch):

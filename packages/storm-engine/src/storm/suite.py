@@ -416,8 +416,15 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
     spec = json_compatible(spec)
     catalog = catalog or default_catalog()
     descriptor = catalog.get(spec['model'])
+    preapplied_steps = spec.get('preapplied_steps', [])
+    if (not isinstance(preapplied_steps, list)
+            or any(not isinstance(step, str) or not step for step in preapplied_steps)
+            or len(preapplied_steps) != len(set(preapplied_steps))):
+        raise ValueError('preapplied_steps must be a unique list of nonempty step types')
+    steps_for_validation = list(spec.get('steps', [])) + [
+        {'type': step} for step in preapplied_steps]
     missing_steps = missing_required_pipeline_steps(
-        spec['model'], spec.get('steps', []), catalog)
+        spec['model'], steps_for_validation, catalog)
     if missing_steps:
         raise ValueError(
             f"Model {spec['model']} requires preparation step(s): "
@@ -449,7 +456,9 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
                 or source_spec.get('connector', 'numeric_json')
                 != spec.get('connector', 'numeric_json')
                 or source_spec.get('config', {}) != spec.get('config', {})
-                or source_spec.get('steps', []) != spec.get('steps', [])):
+                or source_spec.get('steps', []) != spec.get('steps', [])
+                or source_spec.get('preapplied_steps', [])
+                != spec.get('preapplied_steps', [])):
             raise ValueError('Saved model, version, configuration, or preparation is incompatible')
         if not inference_from.get('model_ref') or not isinstance(
                 inference_from.get('fitted_steps'), list) or len(
@@ -507,7 +516,9 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
             raise ValueError('Model does not support incremental updates')
         if (update_from['model'] != spec['model'] or update_from['model_version'] != descriptor.version
                 or update_from['spec'].get('config', {}) != spec.get('config', {})
-                or update_from['spec'].get('steps', []) != spec.get('steps', [])):
+                or update_from['spec'].get('steps', []) != spec.get('steps', [])
+                or update_from['spec'].get('preapplied_steps', [])
+                != spec.get('preapplied_steps', [])):
             raise ValueError('Incremental model and preparation must remain compatible')
         model = store.load(ArtifactRef.from_dict(update_from['model_ref']))
         previous_steps = update_from['fitted_steps']

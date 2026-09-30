@@ -279,6 +279,16 @@ def perform(job_id):
                 spec['data'] = connector_input(
                     dataset_revision.pk, workspace=settings.WORKSPACE,
                     artifact_root=settings.ARTIFACT_ROOT)
+                spec.pop('preapplied_steps', None)
+                if dataset_revision.connector == 'prepared_artifact':
+                    preparation = Revision.objects.filter(
+                        pk=dataset_revision.config.get('preparation_revision_id'),
+                        study=job.revision.study, kind='preparation').first()
+                    if preparation is not None:
+                        spec['preapplied_steps'] = list(dict.fromkeys(
+                            step['type'] for step in preparation.payload.get('steps', [])
+                            if isinstance(step, dict) and isinstance(step.get('type'), str)
+                        ))
                 if spec.get('preparation_revision_id'):
                     from storm_studio.data_preparation import resolve_preparation_steps
 
