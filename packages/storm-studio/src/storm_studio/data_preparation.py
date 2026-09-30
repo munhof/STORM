@@ -111,7 +111,7 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
     if len(partitions) != count or len(reserved) != count:
         raise ValueError('Partition and reservation metadata must align with inputs.')
     for key in ALIGNED_FIELDS:
-        if key in data and len(data[key]) != count:
+        if key in data and data[key] is not None and len(data[key]) != count:
             raise ValueError(f'{key} must align with inputs.')
 
     train_indices = [i for i, partition in enumerate(partitions) if partition == 'train']
@@ -171,7 +171,7 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
     prepared = deepcopy(data)
     prepared['inputs'] = [by_index[index] for index in selected]
     for key in ALIGNED_FIELDS:
-        if key in data:
+        if key in data and data[key] is not None:
             prepared[key] = [data[key][index] for index in selected]
     prepared['train'] = [index for index, source_index in enumerate(selected)
                          if partitions[source_index] == 'train' and not reserved[source_index]]

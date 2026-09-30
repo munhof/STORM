@@ -986,6 +986,50 @@ def test_preparation_worker_materializes_a_reusable_dataset_without_a_model(
     assert model_job.result['predictions'] == [[99.0, 985.0]]
 
 
+def test_preparation_materializes_unsupervised_pose_with_null_targets(
+        client, settings, tmp_path):
+    from storm.artifacts import ArtifactRef, FileArtifactStore
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
+    from storm_studio.services import enqueue_preparation, perform
+
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    loaded = {
+        'inputs': [[0.0, 10.0], [2.0, 20.0], [100.0, 1000.0]],
+        'targets': None,
+        'observation_ids': ['mouse:0', 'mouse:1', 'mouse:2'],
+        'frames': [0, 1, 2],
+        'sessions': ['mouse'] * 3,
+        'segments': ['mouse:segment-0'] * 3,
+        'partitions': ['train', 'train', 'test'],
+        'reserved_evaluation': [False, False, False],
+        'feature_names': ['nose_x', 'nose_y'],
+    }
+    store = FileArtifactStore(settings.ARTIFACT_ROOT)
+    source_ref = store.save(kind='datasets', artifact_id='unlabeled-pose', value=loaded)
+    dataset = Dataset.objects.create(name='Unsupervised pose')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        inventory={'frame_count': 3, 'feature_names': loaded['feature_names']},
+        artifact_ref=source_ref.to_dict())
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
+                                 dataset_revision=source)
+    recipe = Revision.objects.create(study=study, kind='preparation', payload={
+        'name': 'Centrar pose no supervisada', 'dataset_revision_id': source.pk,
+        'steps': [{'type': 'center'}],
+    })
+
+    job = enqueue_preparation(study, recipe)
+    perform(str(job.pk))
+    job.refresh_from_db()
+
+    assert job.status == 'completed', job.error
+    prepared_revision = DatasetRevision.objects.get(
+        dataset=dataset, connector='prepared_artifact')
+    prepared = store.load(ArtifactRef.from_dict(prepared_revision.artifact_ref))
+    assert prepared['targets'] is None
+    assert prepared['inputs'] == [[-1.0, -5.0], [1.0, 5.0], [99.0, 985.0]]
+
+
 def test_pose_preparation_names_resolve_after_coordinate_selection():
     from storm_studio.data_preparation import resolve_preparation_steps
 
