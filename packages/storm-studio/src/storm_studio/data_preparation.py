@@ -144,14 +144,12 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
         'feature_names', 'taxonomy', 'likelihood_bodyparts', 'likelihoods', 'frames',
         'sessions', 'segments', 'partitions', 'reserved_evaluation') if key in data}
 
-    _, fitted, _ = transform_aligned(
-        [inputs[i] for i in fit_indices], fit_indices, steps,
-        catalog=catalog, context_metadata=metadata)
     training_stage_trace = []
-    prepared_train, _, selected_train = transform_aligned(
-        [inputs[i] for i in train_indices], train_indices, steps, learned=fitted,
+    prepared_train, fitted, selected_train = transform_aligned(
+        [inputs[i] for i in train_indices], train_indices, steps,
         catalog=catalog, context_metadata=metadata,
-        stage_trace=training_stage_trace)
+        stage_trace=training_stage_trace,
+        fit_observation_indices=fit_indices)
     evaluation_stage_trace = []
     if evaluation_indices:
         prepared_evaluation, _, selected_evaluation = transform_aligned(

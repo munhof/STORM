@@ -13,6 +13,7 @@ from storm.suite import default_catalog, execute, infer
 from storm_studio.models import DatasetRevision, Job, Revision
 
 logger = logging.getLogger(__name__)
+MAX_INLINE_RESOLVED_DATA_OBSERVATIONS = 100_000
 
 
 def catalog():
@@ -160,6 +161,45 @@ def _record_progress(job_id, update):
     Job.objects.filter(pk=job_id, status='running').update(progress=progress)
 
 
+def load_execution_result(job):
+    """Load the full result when a large result keeps its data in artifacts."""
+    result = job.result if isinstance(job.result, dict) else {}
+    artifact_ref = result.get('result_artifact_ref')
+    if not artifact_ref:
+        return result
+    from storm.artifacts import ArtifactRef, FileArtifactStore
+
+    return FileArtifactStore(settings.ARTIFACT_ROOT).load(
+        ArtifactRef.from_dict(artifact_ref))
+
+
+def _result_for_database(job_id, result):
+    data = result.get('resolved_data') if isinstance(result, dict) else None
+    inputs = data.get('inputs') if isinstance(data, dict) else None
+    if not isinstance(inputs, list) or len(inputs) <= MAX_INLINE_RESOLVED_DATA_OBSERVATIONS:
+        return result
+    from storm.artifacts import FileArtifactStore
+
+    try:
+        artifact_ref = FileArtifactStore(settings.ARTIFACT_ROOT).resolve(
+            kind='results', artifact_id=str(job_id))
+    except (FileNotFoundError, KeyError):
+        return result
+    targets = data.get('targets')
+    metric_indices = result.get('metric_indices', result.get('indices', []))
+    targets_available = bool(metric_indices) and isinstance(targets, list) and all(
+        type(index) is int and 0 <= index < len(targets) and targets[index] is not None
+        for index in metric_indices)
+    compact = {key: value for key, value in result.items() if key != 'resolved_data'}
+    compact['resolved_data_summary'] = {
+        'observation_count': len(inputs),
+        'taxonomy': data.get('taxonomy'),
+        'targets_available_for_metrics': targets_available,
+    }
+    compact['result_artifact_ref'] = artifact_ref.to_dict()
+    return compact
+
+
 def perform(job_id):
     started = timezone.now()
     if not Job.objects.filter(pk=job_id, status='pending').update(
@@ -285,8 +325,10 @@ def perform(job_id):
             'phase_total': 1, 'fraction': 1.0, 'eta_seconds': 0,
             'updated_at': finished.isoformat(),
         }
+        persisted_result = _result_for_database(job_id, result)
         Job.objects.filter(pk=job_id, status='running').update(
-            status='completed', result=result, progress=final_progress, finished=finished)
+            status='completed', result=persisted_result,
+            progress=final_progress, finished=finished)
     except Exception as error:
         logger.exception('Background job %s failed', job_id)
         if job.operation == 'inventory':
@@ -314,15 +356,16 @@ def propose(job, count=3, seed=0, strategy='random'):
     if job.status != 'completed':
         raise ValueError('Select a completed model')
     spec = job.revision.payload
-    candidates = list(job.result['resolved_data']['train'])
+    result = load_execution_result(job)
+    candidates = list(result['resolved_data']['train'])
     from storm.learning import select_samples
     scores = None
     if strategy == 'uncertainty':
         from storm.artifacts import FileArtifactStore, ArtifactRef
         from storm.suite import transform
-        model = FileArtifactStore(settings.ARTIFACT_ROOT).load(ArtifactRef.from_dict(job.result['model_ref']))
-        prepared, _ = transform([job.result['resolved_data']['inputs'][i] for i in candidates],
-                                spec.get('steps', []), job.result['fitted_steps'], catalog())
+        model = FileArtifactStore(settings.ARTIFACT_ROOT).load(ArtifactRef.from_dict(result['model_ref']))
+        prepared, _ = transform([result['resolved_data']['inputs'][i] for i in candidates],
+                                spec.get('steps', []), result['fitted_steps'], catalog())
         output = model.predict(prepared)
         confidence = output.metadata.get('confidence')
         if output.metadata.get('confidence_semantics') != 'probability' or confidence is None or len(confidence) != len(candidates):
@@ -331,8 +374,8 @@ def propose(job, count=3, seed=0, strategy='random'):
     indices = select_samples(candidates, count=count, seed=seed, strategy=strategy, scores=scores)
     return Revision.objects.create(study=job.revision.study, kind='review', parent=job.revision,
         payload={'job': str(job.pk), 'indices': indices, 'seed': seed, 'strategy': strategy,
-                 'evidence': [{'index': i, 'input': job.result['resolved_data']['inputs'][i],
-                               'target': (job.result['resolved_data'].get('targets') or [None] * len(job.result['resolved_data']['inputs']))[i]} for i in indices],
+                 'evidence': [{'index': i, 'input': result['resolved_data']['inputs'][i],
+                               'target': (result['resolved_data'].get('targets') or [None] * len(result['resolved_data']['inputs']))[i]} for i in indices],
                  'status': 'pending'})
 
 
@@ -539,11 +582,94 @@ def comparable(jobs):
     return not compare_reasons(jobs)
 
 
+def compare_group_stability(jobs):
+    """Compare two grouping runs with permutation-invariant adjusted Rand index."""
+    if len(jobs) != 2:
+        return None
+    first, second = [job.result if isinstance(job.result, dict) else {} for job in jobs]
+    if any('group' not in result.get('capabilities', []) for result in (first, second)):
+        return None
+    fingerprint = first.get('data_fingerprint')
+    if not fingerprint or fingerprint != second.get('data_fingerprint'):
+        return None
+
+    def labels_by_index(result):
+        indices = result.get('indices') or []
+        predictions = result.get('predictions') or []
+        valid = result.get('prediction_mask') or [True] * len(indices)
+        if not (len(indices) == len(predictions) == len(valid)):
+            return None
+        if any(type(item) is not bool for item in valid):
+            return None
+        return {index: prediction for index, prediction, keep
+                in zip(indices, predictions, valid) if keep}
+
+    first_labels, second_labels = labels_by_index(first), labels_by_index(second)
+    if first_labels is None or second_labels is None:
+        return None
+    common = sorted(first_labels.keys() & second_labels.keys())
+    if len(common) < 2:
+        return None
+
+    from collections import Counter
+
+    left = [first_labels[index] for index in common]
+    right = [second_labels[index] for index in common]
+    left_counts, right_counts = Counter(left), Counter(right)
+    cells = Counter(zip(left, right))
+    choose_two = lambda count: count * (count - 1) / 2
+    cell_pairs = sum(choose_two(count) for count in cells.values())
+    left_pairs = sum(choose_two(count) for count in left_counts.values())
+    right_pairs = sum(choose_two(count) for count in right_counts.values())
+    total_pairs = choose_two(len(common))
+    expected = left_pairs * right_pairs / total_pairs
+    maximum = 0.5 * (left_pairs + right_pairs)
+    denominator = maximum - expected
+    if denominator == 0:
+        left_to_right, right_to_left = {}, {}
+        same_partition = True
+        for left_label, right_label in zip(left, right):
+            if ((left_label in left_to_right and left_to_right[left_label] != right_label)
+                    or (right_label in right_to_left
+                        and right_to_left[right_label] != left_label)):
+                same_partition = False
+                break
+            left_to_right[left_label] = right_label
+            right_to_left[right_label] = left_label
+        value = 1.0 if same_partition else 0.0
+    else:
+        value = (cell_pairs - expected) / denominator
+    return {
+        'metric': 'ARI',
+        'value': round(value, 6),
+        'observations': len(common),
+        'interpretation': (
+            'No mide concordancia humana; cuantifica la estabilidad de la partición '
+            'entre estas dos corridas y no depende de los IDs de estado.'),
+    }
+
+
 def compare_reasons(jobs):
     """Return explicit reasons why completed results cannot be ranked together."""
     if len(jobs) < 2:
         return ['Select at least two completed executions']
     reasons = []
+    results = [job.result if isinstance(job.result, dict) else {} for job in jobs]
+    data_summaries = []
+    for result in results:
+        summary = result.get('resolved_data_summary')
+        if not isinstance(summary, dict):
+            data = result.get('resolved_data') or {}
+            targets = data.get('targets')
+            indices = result.get('metric_indices', result.get('indices', ()))
+            summary = {
+                'taxonomy': data.get('taxonomy'),
+                'targets_available_for_metrics': (
+                    bool(indices) and isinstance(targets, list) and all(
+                        type(index) is int and 0 <= index < len(targets)
+                        and targets[index] is not None for index in indices)),
+            }
+        data_summaries.append(summary)
     if len({j.result.get('data_fingerprint') for j in jobs}) != 1:
         reasons.append('data fingerprints differ')
     if len({j.result.get('partition') for j in jobs}) != 1:
@@ -583,17 +709,15 @@ def compare_reasons(jobs):
             reasons.append(
                 'training population is unknown; overlap with the evaluation benchmark cannot be ruled out')
             break
-    taxonomies = {
-        json.dumps(j.result.get('resolved_data', {}).get('taxonomy'), sort_keys=True)
-        for j in jobs
-    }
+    taxonomies = {json.dumps(item.get('taxonomy'), sort_keys=True)
+                  for item in data_summaries}
     if len(taxonomies) != 1:
         reasons.append('target taxonomies differ')
-    for job in jobs:
-        metadata = job.result.get('output_metadata', {})
+    for result, summary in zip(results, data_summaries):
+        metadata = result.get('output_metadata', {})
         if metadata.get('task') != 'binary_classification':
             continue
-        taxonomy = job.result.get('resolved_data', {}).get('taxonomy')
+        taxonomy = summary.get('taxonomy')
         mapping = metadata.get('category_mapping')
         if (not isinstance(taxonomy, list) or len(taxonomy) != 2
                 or any(not isinstance(label, str) or not label for label in taxonomy)
@@ -612,12 +736,18 @@ def compare_reasons(jobs):
         reasons.append('evaluated metric observations differ')
     metric_targets = []
     targets_missing = False
-    for job in jobs:
-        targets = job.result.get('resolved_data', {}).get('targets')
-        indices = job.result.get('metric_indices', job.result.get('indices', ()))
-        if (not isinstance(targets, list) or any(
+    for job, result, summary in zip(jobs, results, data_summaries):
+        if 'targets_available_for_metrics' in summary:
+            if not summary['targets_available_for_metrics']:
+                targets_missing = True
+                continue
+            metric_targets.append(result.get('data_fingerprint'))
+            continue
+        targets = result.get('resolved_data', {}).get('targets')
+        indices = result.get('metric_indices', result.get('indices', ()))
+        if not isinstance(targets, list) or any(
                 type(index) is not int or not 0 <= index < len(targets)
-                or targets[index] is None for index in indices)):
+                or targets[index] is None for index in indices):
             targets_missing = True
             continue
         metric_targets.append(json.dumps([targets[index] for index in indices], sort_keys=True))
@@ -642,7 +772,10 @@ def annotate(job, *, taxonomy, intervals, mapping, author, reason):
         raise ValueError('Taxonomy must contain distinct nonempty names')
     if not isinstance(intervals, list) or not isinstance(mapping, dict):
         raise ValueError('Expected interval list and interpretation object')
-    count = len(job.result['resolved_data']['inputs'])
+    summary = job.result.get('resolved_data_summary', {})
+    count = summary.get('observation_count')
+    if not isinstance(count, int):
+        count = len(job.result['resolved_data']['inputs'])
     for item in intervals:
         if (not isinstance(item, dict) or type(item.get('start')) is not int or type(item.get('stop')) is not int
                 or not 0 <= item['start'] < item['stop'] <= count or item.get('label') not in taxonomy):

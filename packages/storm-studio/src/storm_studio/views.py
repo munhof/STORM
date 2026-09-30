@@ -182,7 +182,7 @@ def _pose_prediction_run_options(study, dataset_revision, completed, selected_id
         return [], []
     options = []
     for job in completed:
-        result = job.result
+        result = services.load_execution_result(job)
         spec = result.get('spec') or {}
         try:
             job_dataset = DatasetRevision.objects.get(
@@ -667,6 +667,7 @@ def page(request, study_id, section):
     else:
         compared_jobs = completed
     comparison_rows = []
+    group_stability = services.compare_group_stability(compared_jobs)
     if len(compared_jobs) == 2:
         first, second = compared_jobs
         first_fingerprint = first.result.get('data_fingerprint')
@@ -711,14 +712,15 @@ def page(request, study_id, section):
     evidence = []
     annotation = None
     output_metadata = {}
-    if selected:
-        data = selected.result['resolved_data']
-        output_metadata = selected.result.get('output_metadata', {})
+    if selected and section == 'evidence':
+        selected_result = services.load_execution_result(selected)
+        data = selected_result['resolved_data']
+        output_metadata = selected_result.get('output_metadata', {})
         annotation = study.revision_set.filter(kind='annotations', payload__job=str(selected.pk)).order_by('-pk').first()
-        prediction_mask = selected.result.get(
-            'prediction_mask', [True] * len(selected.result['indices']))
+        prediction_mask = selected_result.get(
+            'prediction_mask', [True] * len(selected_result['indices']))
         for index, prediction, prediction_valid in zip(
-                selected.result['indices'], selected.result['predictions'], prediction_mask):
+                selected_result['indices'], selected_result['predictions'], prediction_mask):
             confidence = output_metadata.get('confidence', [])
             output_position = len(evidence)
             evidence.append({'index': index, 'raw': data['inputs'][index], 'prediction': prediction,
@@ -1035,6 +1037,7 @@ def page(request, study_id, section):
         'visual_state_json': json.dumps(restored_snapshot.payload.get('visual_state', {}) if restored_snapshot else {}),
         'restored_snapshot': restored_snapshot,
         'comparison_rows': comparison_rows,
+        'group_stability': group_stability,
         'lifecycle': lifecycle,
         'stage_states': stage_states,
         'stage_tree': stage_tree,
@@ -1213,6 +1216,7 @@ def run(request, revision_id):
     revision = get_object_or_404(
         Revision.objects.select_for_update(), pk=revision_id, kind='plan')
     dataset_revision_id = revision.payload.get('dataset_revision_id')
+    dataset_revision = None
     if dataset_revision_id is not None:
         from storm_studio.video_timeline_reviews import require_review
 
@@ -1241,9 +1245,24 @@ def run(request, revision_id):
     planned_models = (branch_models if request.POST.get('run_branches') else
                       selected_models or [revision.payload.get('model')])
     worker_catalog = services.catalog()
+    prepared_step_types = set()
+    if (dataset_revision is not None
+            and dataset_revision.connector == 'prepared_artifact'
+            and dataset_revision.status == 'ready'
+            and dataset_revision.artifact_ref):
+        preparation_id = dataset_revision.config.get('preparation_revision_id')
+        preparation = Revision.objects.filter(
+            pk=preparation_id, study=revision.study, kind='preparation').first()
+        if preparation is not None:
+            prepared_step_types = {
+                step.get('type') for step in preparation.payload.get('steps', [])
+                if isinstance(step, dict)
+            }
     for model_name in planned_models:
         missing_steps = missing_required_pipeline_steps(
             model_name, revision.payload.get('steps', []), worker_catalog)
+        missing_steps = [step for step in missing_steps
+                         if step not in prepared_step_types]
         if missing_steps:
             model_label = {
                 'vame_native': 'VAME nativo',
@@ -1439,7 +1458,8 @@ def revise(request, revision_id):
 def report(request, job_id, format):
     job = get_object_or_404(Job, pk=job_id, status='completed')
     if format == 'json':
-        response = JsonResponse(job.result, json_dumps_params={'indent': 2})
+        response = JsonResponse(
+            services.load_execution_result(job), json_dumps_params={'indent': 2})
     elif format == 'csv':
         stream = io.StringIO()
         writer = csv.writer(stream)
@@ -1447,7 +1467,10 @@ def report(request, job_id, format):
         writer.writerows(zip(job.result['indices'], job.result['predictions']))
         response = HttpResponse(stream.getvalue(), content_type='text/csv')
     elif format == 'html':
-        response = render(request, 'storm_studio/report.html', {'job': job, 'manifest': json.dumps(job.result, indent=2)})
+        response = render(request, 'storm_studio/report.html', {
+            'job': job,
+            'manifest': json.dumps(services.load_execution_result(job), indent=2),
+        })
     else:
         raise Http404
     response['Content-Disposition'] = f'attachment; filename="storm-{job.pk}.{format}"'
@@ -1745,7 +1768,7 @@ def pose_preview_data(request, study_id, dataset_revision_id):
                 status=409)
         for job_id in requested_ids:
             job = by_id[job_id]
-            result = job.result
+            result = services.load_execution_result(job)
             data = result['resolved_data']
             inputs = data['inputs']
             observation_ids = data['observation_ids']
@@ -2400,8 +2423,9 @@ def visualization(request, job_id, visualizer):
     job = get_object_or_404(Job, pk=job_id, status='completed')
     try:
         output = FileArtifactStore(settings.ARTIFACT_ROOT).load(ArtifactRef.from_dict(job.result['output_ref']))
-        resolved_data = job.result['resolved_data']
-        indices = job.result['indices']
+        result = services.load_execution_result(job)
+        resolved_data = result['resolved_data']
+        indices = result['indices']
         visual_metadata = {'execution_id': str(job.pk), 'indices': indices}
         for key in ('frames', 'sessions', 'segments', 'partitions'):
             rows = resolved_data.get(key)
@@ -2409,7 +2433,7 @@ def visualization(request, job_id, visualizer):
                 visual_metadata[key] = [rows[index] for index in indices]
         result = VisualizationManager(services.catalog().visualizations).render(
             VisualizationSpec(visualizer), VisualizationRequest(
-                data=resolved_data['inputs'], output=output, metrics=job.result['metrics'],
+                data=resolved_data['inputs'], output=output, metrics=result['metrics'],
                 metadata=visual_metadata))
         if result.media_type not in ('image/svg+xml', 'image/png', 'text/plain'):
             raise ValueError('This browser endpoint supports SVG, PNG or text renderers')

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from storm_studio.services import compare_reasons
+from storm_studio.services import compare_group_stability, compare_reasons
 
 
 def run(mask, targets):
@@ -106,3 +106,27 @@ def test_known_split_training_does_not_need_imported_population_metadata():
     second.result['output_metadata'].pop('training_population')
 
     assert compare_reasons([first, second]) == []
+
+
+def test_group_stability_uses_permutation_invariant_ari_for_same_data():
+    first = SimpleNamespace(result={
+        'capabilities': ['group'], 'data_fingerprint': 'same-data',
+        'indices': [0, 1, 2, 3, 4, 5],
+        'predictions': [0, 0, 0, 1, 1, 1],
+        'prediction_mask': [True] * 6,
+        'output_metadata': {'semantics': 'model-local VAME state IDs'},
+    })
+    second = SimpleNamespace(result={
+        'capabilities': ['group'], 'data_fingerprint': 'same-data',
+        'indices': [0, 1, 2, 3, 4, 5],
+        'predictions': [8, 8, 8, 3, 3, 3],
+        'prediction_mask': [True] * 6,
+        'output_metadata': {'semantics': 'model-local VAME state IDs'},
+    })
+
+    result = compare_group_stability([first, second])
+
+    assert result['metric'] == 'ARI'
+    assert result['value'] == 1.0
+    assert result['observations'] == 6
+    assert 'No mide concordancia humana' in result['interpretation']

@@ -171,6 +171,53 @@ def test_run_rejects_a_model_when_its_required_preparation_step_is_missing(clien
     assert 'La corrida no empezó y no modificó tus datos'.encode() in response.content
 
 
+def test_run_accepts_prepared_dataset_that_already_contains_required_model_steps(
+        client, monkeypatch):
+    from storm.pipeline import PipelineStep
+    from storm.suite import Component, default_catalog
+    from storm_studio import services
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study, Job
+
+    class NativeVAME:
+        required_pipeline_steps = ('pose.temporal_windows',)
+
+    class TemporalWindows(PipelineStep):
+        step_type = 'pose.temporal_windows'
+
+        def process(self, context):
+            return context
+
+    catalog = default_catalog()
+    catalog.steps.register(TemporalWindows)
+    catalog.register(Component('vame_native', NativeVAME, ('group',), {'type': 'object'}))
+    monkeypatch.setattr(services, 'catalog', lambda: catalog)
+    dataset = Dataset.objects.create(name='Prepared pose')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready')
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='VAME setup',
+                                 dataset_revision=source)
+    recipe = Revision.objects.create(study=study, kind='preparation', payload={
+        'name': 'VAME windows', 'dataset_revision_id': source.pk,
+        'steps': [{'type': 'pose.temporal_windows',
+                   'config': {'offsets': [-1, 0, 1]}}],
+    })
+    prepared = DatasetRevision.objects.create(
+        dataset=dataset, number=2, connector='prepared_artifact', status='ready',
+        config={'source_dataset_revision_id': source.pk,
+                'preparation_revision_id': recipe.pk},
+        artifact_ref={'kind': 'datasets', 'artifact_id': 'prepared-test'})
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'vame_native', 'config': {}, 'steps': [],
+        'dataset_revision_id': prepared.pk, 'connector': 'prepared_artifact',
+        'data': {},
+    })
+
+    response = client.post(f'/plans/{plan.pk}/run/')
+
+    assert response.status_code == 302
+    assert Job.objects.filter(revision=plan, status='pending').exists()
+
+
 def test_flow_can_load_a_registered_historical_recipe_preset(client, monkeypatch):
     from storm.suite import Component, default_catalog
     from storm_studio import forms, services
@@ -1028,6 +1075,83 @@ def test_preparation_materializes_unsupervised_pose_with_null_targets(
     prepared = store.load(ArtifactRef.from_dict(prepared_revision.artifact_ref))
     assert prepared['targets'] is None
     assert prepared['inputs'] == [[-1.0, -5.0], [1.0, 5.0], [99.0, 985.0]]
+
+
+def test_preparation_fits_and_transforms_training_in_one_pass(
+        client, settings, tmp_path, monkeypatch):
+    from storm.artifacts import FileArtifactStore
+    from storm_studio import data_preparation
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
+    from storm_studio.services import enqueue_preparation, perform
+
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    loaded = {
+        'inputs': [[0.0, 10.0], [2.0, 20.0], [100.0, 1000.0]],
+        'targets': None,
+        'frames': [0, 1, 2], 'sessions': ['mouse'] * 3,
+        'segments': ['mouse:segment-0'] * 3,
+        'partitions': ['train', 'train', 'test'],
+        'reserved_evaluation': [False, True, False],
+        'feature_names': ['nose_x', 'nose_y'],
+    }
+    store = FileArtifactStore(settings.ARTIFACT_ROOT)
+    source_ref = store.save(kind='datasets', artifact_id='one-pass-pose', value=loaded)
+    dataset = Dataset.objects.create(name='One-pass pose')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        artifact_ref=source_ref.to_dict())
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
+                                 dataset_revision=source)
+    recipe = Revision.objects.create(study=study, kind='preparation', payload={
+        'name': 'Centrar una vez', 'dataset_revision_id': source.pk,
+        'steps': [{'type': 'center'}],
+    })
+
+    original = data_preparation.transform_aligned
+    calls = []
+
+    def record(values, indices, steps, *args, **kwargs):
+        calls.append((len(values), kwargs.get('learned') is not None,
+                      kwargs.get('fit_observation_indices')))
+        return original(values, indices, steps, *args, **kwargs)
+
+    monkeypatch.setattr(data_preparation, 'transform_aligned', record)
+    job = enqueue_preparation(study, recipe)
+    perform(str(job.pk))
+    job.refresh_from_db()
+
+    assert job.status == 'completed', job.error
+    assert calls == [(2, False, [0]), (2, True, None)]
+
+
+def test_large_execution_results_keep_resolved_data_in_the_artifact_store(
+        settings, tmp_path, monkeypatch):
+    from storm.artifacts import ArtifactRef
+    from storm_studio.models import Job, Project, Revision, Study
+    from storm_studio import services
+
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    monkeypatch.setattr(
+        services, 'MAX_INLINE_RESOLVED_DATA_OBSERVATIONS', 2, raising=False)
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Large results')
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'operation': 'train', 'model': 'identity', 'connector': 'numeric_json',
+        'config': {}, 'steps': [], 'metrics': [], 'seed': 42,
+        'data': {'inputs': [1, 2, 3], 'targets': [1, 2, 3],
+                 'train': [0, 1], 'test': [2]},
+    })
+    job = Job.objects.create(revision=plan, operation='train')
+
+    services.perform(str(job.pk))
+    job.refresh_from_db()
+
+    assert job.status == 'completed'
+    assert 'resolved_data' not in job.result
+    assert job.result['resolved_data_summary']['observation_count'] == 3
+    restored = services.load_execution_result(job)
+    assert restored['resolved_data']['inputs'] == [1, 2, 3]
+    assert restored['resolved_data']['targets'] == [1, 2, 3]
+    assert ArtifactRef.from_dict(job.result['result_artifact_ref']).kind == 'results'
 
 
 def test_pose_preparation_names_resolve_after_coordinate_selection():
@@ -3151,3 +3275,37 @@ def test_comparison_hides_joint_ranking_when_model_label_meanings_differ(client)
     assert response.status_code == 200
     assert 'output task or category meanings differ' in response.content.decode()
     assert 'Comparación gráfica de métricas' not in response.content.decode()
+
+
+def test_comparison_shows_group_stability_without_claiming_human_accuracy(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Group stability')
+    jobs = []
+    for index, predictions in enumerate(([0, 0, 1, 1], [9, 9, 4, 4])):
+        revision = Revision.objects.create(study=study, kind='plan', payload={
+            'model': 'vame_native', 'config': {}, 'data': {},
+        })
+        jobs.append(Job.objects.create(revision=revision, status='completed', result={
+            'model': 'vame_native', 'model_version': '1', 'capabilities': ['group'],
+            'data_fingerprint': 'same-dataset', 'partition': 'training groups',
+            'indices': [0, 1, 2, 3], 'predictions': predictions,
+            'prediction_mask': [True] * 4, 'metrics': {}, 'metric_definitions': [],
+            'output_metadata': {'semantics': 'model-local VAME state IDs'},
+            'resolved_data_summary': {
+                'observation_count': 4, 'taxonomy': None,
+                'targets_available_for_metrics': False,
+            },
+        }))
+
+    response = client.get(
+        f'/studies/{study.pk}/compare/?jobs={jobs[0].pk}&jobs={jobs[1].pk}')
+
+    assert response.status_code == 200
+    assert response.context['section'] == 'compare'
+    assert response.context['comparison_requested'] is True
+    assert response.context['group_stability']['value'] == 1.0
+    content = response.content.decode()
+    assert 'Estabilidad entre corridas · ARI 1,0' in content
+    assert 'No mide concordancia humana' in content
+    assert 'Inspección solamente; no se habilita ranking conjunto.' in content
