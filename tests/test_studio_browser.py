@@ -426,6 +426,51 @@ def test_vame_native_recovery_and_historical_recipe_loader(live_server, settings
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize('section', ['data', 'prepare'])
+@pytest.mark.parametrize('chunked', [False, True])
+def test_pose_viewer_frame_navigation_works_with_keyboard_at_mobile_width(live_server, section, chunked, settings, tmp_path):
+    from storm_studio.models import Dataset, DatasetRevision, Project, Study
+    dataset = Dataset.objects.create(name='Mobile pose timeline')
+    source = DatasetRevision.objects.create(dataset=dataset, number=1, connector='dlc_h5',
+        status='ready', inventory={
+            'feature_names': ['nose_x', 'nose_y', 'body_x', 'body_y'],
+            'frame_count': 2,
+            'preview': [{'observation_id': f'a:{frame}', 'session_id': 'a',
+                         'segment': 'a:0', 'frame': frame,
+                         'features': [frame, frame + 1, 5, 6]} for frame in range(2)]})
+    if chunked:
+        from storm_studio.pose_preview import write_pose_preview_store
+        settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+        source.inventory['pose_preview_store'] = write_pose_preview_store({
+            'feature_names': source.inventory['feature_names'],
+            'inputs': [[0, 1, 5, 6], [1, 2, 5, 6]],
+            'sessions': ['a', 'a'], 'frames': [0, 1], 'segments': ['a:0', 'a:0'],
+        }, root=settings.ARTIFACT_ROOT, artifact_id='mobile-pose', chunk_size=1)
+        source.save(update_fields=['inventory'])
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Mobile pose',
+                                 dataset_revision=source)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={'width': 390, 'height': 844})
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.goto(f'{live_server.url}/studies/{study.pk}/{section}/')
+        slider = page.get_by_label('Frame actual de pose', exact=True)
+        expect(slider).to_be_visible()
+        slider.focus()
+        slider.press('ArrowRight')
+        expect(page.locator('#pose-motion-readout')).to_contain_text('frame 1')
+        slider.press('Home')
+        expect(page.locator('#pose-motion-readout')).to_contain_text('frame 0')
+        dimensions = page.evaluate('''() => ({
+            width: document.documentElement.scrollWidth, viewport: innerWidth
+        })''')
+        assert dimensions['width'] <= dimensions['viewport'], dimensions
+        assert not errors
+        browser.close()
+
+
+@pytest.mark.django_db(transaction=True)
 def test_pose_preparation_is_keyboard_operable_at_mobile_width(live_server, settings):
     pytest.importorskip('rainstorm_thesis.plugin')
     from storm_studio.models import Dataset, DatasetRevision, Project, Study
