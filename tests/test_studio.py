@@ -2665,6 +2665,27 @@ def test_preparation_recovers_a_valid_orphan_artifact_without_transforming_again
     assert recovered_revision.config['recovered_artifact'] is True
 
 
+def test_report_visuals_do_not_pool_session_local_states():
+    from storm_studio.views import _report_visuals
+
+    result = {
+        'capabilities': ['group'], 'indices': [0, 1, 2, 3],
+        'predictions': [0, 0, 0, 0], 'prediction_mask': [True] * 4,
+        'output_metadata': {'discretizer_scope': 'session_local'},
+        'resolved_data': {'inputs': [[0]] * 4, 'sessions': ['a', 'a', 'b', 'b'],
+                          'frames': [0, 1, 0, 1]},
+    }
+    visuals = _report_visuals(result)
+    assert visuals['predictions'] == []
+    assert visuals['state_durations'] == []
+    assert visuals['state_scope_warning']
+    assert visuals['valid_prediction_count'] == 4
+    result['output_metadata']['discretizer_scope'] = 'shared_training_model'
+    shared = _report_visuals(result)
+    assert shared['predictions'][0]['count'] == 4
+    assert not shared['state_scope_warning']
+
+
 def test_report_visuals_summarize_state_bouts_and_frame_transitions():
     from storm_studio.views import _report_visuals
 

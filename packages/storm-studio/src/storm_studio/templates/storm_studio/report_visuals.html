@@ -5,6 +5,7 @@
   <div><dt>Predicciones excluidas</dt><dd>{{ report_visuals.excluded_prediction_count }}</dd></div>
   {% if report_visuals.outside_run_count %}<div><dt>Observaciones fuera de esta corrida</dt><dd>{{ report_visuals.outside_run_count }} de {{ report_visuals.observation_count }}</dd></div>{% endif %}
 </dl>
+{% if report_visuals.state_scope_warning %}<section class="card" role="status"><strong>Estados locales por sesión.</strong> Esta corrida usa discretizadores independientes. No se muestran distribuciones, duraciones ni transiciones globales porque un mismo ID puede representar estados distintos en cada sesión. Las predicciones conservan sus IDs originales para inspección.</section>{% endif %}
 {% if report_visuals.taxonomy_alignment_warning %}<section class="card" role="status"><strong>Clases sin correspondencia conductual.</strong> La salida del modelo no está vinculada a la taxonomía del benchmark. La distribución muestra clases del modelo; no permite concluir qué conducta representa cada clase ni hacer un ranking contra esas etiquetas.</section>{% endif %}
 {% if report_visuals.predictions %}
 <section class="report-chart" aria-labelledby="{{ prediction_title_id }}">
