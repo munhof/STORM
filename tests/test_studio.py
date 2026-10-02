@@ -4355,7 +4355,8 @@ def test_gpu_hang_card_explains_retry_keeps_the_failed_backend(client):
     from storm_studio.models import Job, Project, Revision, Study
     study = Study.objects.create(project=Project.objects.create(name='P'), name='GPU failure guidance')
     revision = Revision.objects.create(study=study, kind='plan', payload={'model': 'vame_native', 'config': {'device': 'cuda'}})
-    Job.objects.create(revision=revision, status='failed', error='GPU Hang: SIGABRT')
+    job = Job.objects.create(revision=revision, status='failed', error='GPU Hang: SIGABRT')
     response = client.get(f'/studies/{study.pk}/jobs/')
     assert 'Reintentar conserva la configuración' in response.content.decode()
     assert 'rnn_backend' in response.content.decode()
+    assert f'/jobs/{job.pk}/retry/' not in response.content.decode()
