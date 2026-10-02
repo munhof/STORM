@@ -4317,11 +4317,13 @@ def test_progress_events_do_not_inherit_previous_component_duration():
     job = Job.objects.create(revision=plan, status='running')
     services._record_progress(job.pk, {'phase': 'preparing', 'label': 'Step completed',
                                       'component': 'First', 'span_id': 'first',
-                                      'status': 'completed', 'duration_seconds': 8})
+                                      'status': 'completed', 'duration_seconds': 8,
+                                      'batch_step': 17, 'batch_total': 17})
     services._record_progress(job.pk, {'phase': 'preparing', 'label': 'Validating alignment'})
     job.refresh_from_db()
     assert 'duration_seconds' not in job.progress['trace'][-1]
     assert 'component' not in job.progress['trace'][-1]
+    assert 'batch_step' not in job.progress['trace'][-1]
     services._record_progress(job.pk, {'phase': 'preparing', 'label': 'Step started',
                                       'component': 'Second', 'span_id': 'second', 'status': 'started'})
     job.refresh_from_db()

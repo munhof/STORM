@@ -172,7 +172,9 @@ def _record_progress(job_id, update):
     previous = job.progress if isinstance(job.progress, dict) else {}
     progress = {**previous, **update, 'schema_version': 1,
                 'execution_id': str(job_id), 'updated_at': now.isoformat()}
-    if previous.get('phase') != progress.get('phase') and 'batch_step' not in update:
+    if ('batch_step' not in update and (previous.get('phase') != progress.get('phase')
+            or previous.get('label') != progress.get('label')
+            or update.get('status') in {'started', 'completed', 'failed'})):
         for key in ('batch_step', 'batch_total', 'throughput', 'batch_eta_seconds',
                     'processed_observations', 'total_observations', 'loss'):
             progress.pop(key, None)
