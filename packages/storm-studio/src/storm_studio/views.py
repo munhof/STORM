@@ -301,6 +301,36 @@ def _prediction_label(value, metadata, capabilities=()):
     return f'Estado {label}' if is_state else label
 
 
+def _binary_probability_histogram(result, mask):
+    metadata = result.get('output_metadata') or {}
+    probabilities = metadata.get('probabilities')
+    predictions = result.get('predictions') or []
+    if (metadata.get('task') != 'binary_classification'
+            or not isinstance(probabilities, list) or len(probabilities) != len(predictions)):
+        return None
+    values = [value for value, valid in zip(probabilities, mask)
+              if valid and _finite_report_number(value) and 0 <= value <= 1]
+    if not values:
+        return None
+    counts = [0] * 10
+    for value in values:
+        counts[min(9, int(value * 10))] += 1
+    maximum = max(counts)
+    bins = [{'label': f'{index / 10:.1f}–{(index + 1) / 10:.1f}',
+             'count': count, 'x': 50 + index * 60,
+             'text_x': 77 + index * 60,
+             'height': round(150 * count / maximum),
+             'y': 170 - round(150 * count / maximum)}
+            for index, count in enumerate(counts)]
+    threshold = metadata.get('threshold')
+    if not (_finite_report_number(threshold) and 0 <= threshold <= 1):
+        threshold = None
+    return {'bins': bins, 'count': len(values), 'mean': round(sum(values) / len(values), 4),
+            'invalid_count': sum(mask) - len(values),
+            'meaning': _prediction_label(1, metadata), 'threshold': threshold,
+            'threshold_x': round(50 + threshold * 600) if threshold is not None else None}
+
+
 def _report_visuals(result):
     """Build small, dependency-free SVG chart data for one execution result."""
     from collections import Counter
@@ -409,6 +439,7 @@ def _report_visuals(result):
             'prediction_coverage': round(100 * valid_prediction_count / output_count, 1)
             if output_count else None,
             'taxonomy_alignment_warning': taxonomy_alignment_warning,
+            'probability_histogram': _binary_probability_histogram(result, mask),
             **state_diagnostics,
             'prediction_height': max(90, 42 + len(prediction_rows) * 30),
             'metric_height': max(90, 42 + len(metric_rows) * 30),

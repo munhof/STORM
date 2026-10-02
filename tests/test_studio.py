@@ -4360,3 +4360,22 @@ def test_gpu_hang_card_explains_retry_keeps_the_failed_backend(client):
     assert 'Reintentar conserva la configuración' in response.content.decode()
     assert 'rnn_backend' in response.content.decode()
     assert f'/jobs/{job.pk}/retry/' not in response.content.decode()
+
+
+def test_binary_probability_histogram_respects_mask_and_declared_meaning():
+    from storm_studio.views import _report_visuals
+    result = {'indices': [0, 1, 2, 3], 'predictions': [0, 1, 0, 1],
+              'prediction_mask': [True, True, False, True],
+              'output_metadata': {'task': 'binary_classification', 'threshold': 0.5,
+                                  'probabilities': [0.0, 0.5, 0.2, 1.0],
+                                  'category_mapping': {'0': 'negative', '1': 'positive'}},
+              'resolved_data': {'inputs': [[0]] * 4}}
+    histogram = _report_visuals(result)['probability_histogram']
+    assert histogram['count'] == 3
+    assert sum(row['count'] for row in histogram['bins']) == 3
+    assert histogram['bins'][0]['count'] == 1
+    assert histogram['bins'][-1]['count'] == 1
+    assert histogram['mean'] == 0.5
+    assert histogram['meaning'] == 'positive'
+    result['output_metadata']['probabilities'] = [0.1]
+    assert _report_visuals(result)['probability_histogram'] is None
