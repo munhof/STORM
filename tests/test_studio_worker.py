@@ -14,6 +14,7 @@ def test_worker_heartbeat_reports_liveness_without_claiming_new_progress():
         'phase_step': 2, 'phase_total': 10, 'unit_label': 'épocas',
     }, quiet_seconds=45)
 
+    assert 'No confirma avance del procesamiento' in message
     assert 'El proceso sigue activo' in message
     assert 'Etapa 3 de 5' in message
     assert 'Entrenando el modelo' in message

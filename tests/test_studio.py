@@ -4307,3 +4307,22 @@ def test_connector_input_preserves_inference_only_policy_and_label_mapping(tmp_p
     assert data['canonical_taxonomy'] == ['Known', 'Novel']
     assert data['label_mapping_by_session']['NOR_TS_01'] == {
         'object_a': 'Novel', 'object_b': 'Known'}
+
+
+def test_progress_events_do_not_inherit_previous_component_duration():
+    from storm_studio import services
+    from storm_studio.models import Job, Project, Revision, Study
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Trace')
+    plan = Revision.objects.create(study=study, kind='plan', payload={})
+    job = Job.objects.create(revision=plan, status='running')
+    services._record_progress(job.pk, {'phase': 'preparing', 'label': 'Step completed',
+                                      'component': 'First', 'span_id': 'first',
+                                      'status': 'completed', 'duration_seconds': 8})
+    services._record_progress(job.pk, {'phase': 'preparing', 'label': 'Validating alignment'})
+    job.refresh_from_db()
+    assert 'duration_seconds' not in job.progress['trace'][-1]
+    assert 'component' not in job.progress['trace'][-1]
+    services._record_progress(job.pk, {'phase': 'preparing', 'label': 'Step started',
+                                      'component': 'Second', 'span_id': 'second', 'status': 'started'})
+    job.refresh_from_db()
+    assert 'duration_seconds' not in job.progress['trace'][-1]

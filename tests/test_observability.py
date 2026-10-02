@@ -20,3 +20,10 @@ def test_reflected_operation_records_lifecycle_and_failure():
     assert events[-1]['error_type'] == 'ValueError'
     assert events[-1]['schema_version'] == 1
     assert events[1]['duration_seconds'] >= 0
+
+
+def test_completed_event_keeps_an_explicit_operation_label():
+    events = []
+    observer = ExecutionObserver(events.append)
+    observer.call(lambda: 1, '__call__')
+    assert events[-1]['label'].endswith(': __call__ completado')

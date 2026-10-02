@@ -28,7 +28,8 @@ class ExecutionObserver:
             self.emit(**fields, status='failed', duration_seconds=monotonic()-started,
                       error_type=type(error).__name__, error_message=str(error))
             raise
-        self.emit(**fields, status='completed', duration_seconds=monotonic()-started)
+        self.emit(**fields, status='completed', duration_seconds=monotonic()-started,
+                  label=f'{fields["component"]}: {operation} completado')
         return result
 
     def bind(self, component):

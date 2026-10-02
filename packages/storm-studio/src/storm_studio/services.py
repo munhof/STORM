@@ -176,6 +176,10 @@ def _record_progress(job_id, update):
         for key in ('batch_step', 'batch_total', 'throughput', 'batch_eta_seconds',
                     'processed_observations', 'total_observations', 'loss'):
             progress.pop(key, None)
+    for key in ('component', 'component_version', 'operation', 'span_id',
+                'status', 'duration_seconds', 'error_type', 'error_message'):
+        if key not in update:
+            progress.pop(key, None)
     phase_changed = previous.get('phase') != progress.get('phase')
     stage_changed = previous.get('stage_index') != progress.get('stage_index')
     label_changed = previous.get('label') != progress.get('label')

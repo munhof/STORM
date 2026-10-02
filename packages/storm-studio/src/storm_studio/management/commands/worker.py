@@ -26,7 +26,8 @@ def progress_heartbeat(progress, *, quiet_seconds):
     if step is not None and units is not None:
         message += (f" · último avance {step}/{units} "
                     f"{progress.get('unit_label') or 'unidades'}")
-    return f'{message}; sin una actualización de avance hace {quiet_seconds} s.'
+    return (f'{message}; sin una actualización de avance hace {quiet_seconds} s. '
+            'No confirma avance del procesamiento.')
 
 
 def process_identity(pid):

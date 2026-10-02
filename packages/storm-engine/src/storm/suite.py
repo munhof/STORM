@@ -367,11 +367,16 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
         step_metadata = {'observation_indices': list(source_indices), **current_metadata}
         context = PipelineRunner([plugin]).run(PipelineContext(
             data=output, metadata=step_metadata, progress_callback=progress_callback))
+        if progress_callback is not None:
+            progress_callback({'label': f"Validando alineación del paso {position + 1} de {len(steps)}: {step['type']}",
+                               'phase_step': position, 'phase_total': len(steps),
+                               'unit_label': 'pasos de preparación'})
         output = list(context.data)
         mapped = context.metadata.get('observation_indices')
         if not isinstance(mapped, list) or len(mapped) != len(output):
             raise ValueError('A step that changes observations must declare observation_indices')
-        if (any(type(index) is not int or index not in source_indices for index in mapped)
+        source_index_set = set(source_indices)
+        if (any(type(index) is not int or index not in source_index_set for index in mapped)
                 or len(set(mapped)) != len(mapped)):
             raise ValueError('Invalid observation_indices declared by pipeline step')
         if len(output) != len(source_indices) and mapped == source_indices:

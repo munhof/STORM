@@ -190,7 +190,7 @@ def test_aligned_transform_reports_real_step_progress():
         progress_callback=progress.append)
 
     assert prepared == [2.0, 4.0]
-    assert [item['phase_step'] for item in progress if 'phase_step' in item] == [0, 1]
+    assert [item['phase_step'] for item in progress if 'phase_step' in item] == [0, 0, 1]
     assert [item['status'] for item in progress if 'status' in item] == ['started', 'completed']
     assert all(item['phase_total'] == 1 for item in progress if 'phase_total' in item)
     assert all(item['unit_label'] == 'pasos de preparación' for item in progress if 'unit_label' in item)
@@ -276,3 +276,15 @@ def test_metrics_exclude_predictions_outside_model_output_mask(tmp_path):
         },
     }, tmp_path, 'masked-no-predictions', catalog)
     assert no_valid_predictions['evaluation_status'] == 'inspection_only_no_valid_predictions'
+
+
+def test_aligned_mapping_validation_scales_with_observation_count():
+    from time import perf_counter
+    from storm.suite import transform_aligned
+    def elapsed(count):
+        start = perf_counter()
+        transform_aligned(list(range(count)), list(range(count)), [{'type': 'scale', 'factor': 2}])
+        return perf_counter() - start
+    small = min(elapsed(4000) for _ in range(3))
+    large = min(elapsed(32000) for _ in range(3))
+    assert large < small * 25, 'Alignment validation scales quadratically'
