@@ -1294,16 +1294,17 @@ def test_preparation_fits_and_transforms_training_in_one_pass(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize('interruption', ['evaluation', 'step'])
+@pytest.mark.parametrize('interruption', ['evaluation', 'step', 'partial_checkpoint'])
 def test_preparation_recovers_training_partition_after_evaluation_interruption(tmp_path, monkeypatch, interruption):
-    from storm.artifacts import FileArtifactStore
+    from storm.artifacts import ArtifactRef, FileArtifactStore
     from storm.suite import default_catalog
     from storm_studio import data_preparation
     from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
 
     root = tmp_path / 'artifacts'
     reference = FileArtifactStore(root).save(kind='datasets', artifact_id='partial-source',
-        value={'inputs': [2, 4, 100], 'partitions': ['train', 'train', 'test']})
+        value={'inputs': [2, 4, 100], 'partitions': ['train', 'train', 'test'],
+               'reserved_evaluation': [False, True, False]})
     dataset = Dataset.objects.create(name='Interrupted preparation')
     source = DatasetRevision.objects.create(dataset=dataset, number=1,
         connector='numeric_json', status='ready', artifact_ref=reference.to_dict())
@@ -1324,7 +1325,7 @@ def test_preparation_recovers_training_partition_after_evaluation_interruption(t
     def progress(update):
         nonlocal interrupted_once
         events.append(update)
-        if (interruption == 'step' and not interrupted_once
+        if (interruption in {'step', 'partial_checkpoint'} and not interrupted_once
                 and update.get('label', '').startswith('Aplicando paso 2')):
             interrupted_once = True
             raise RuntimeError('interrupted step')
@@ -1332,12 +1333,20 @@ def test_preparation_recovers_training_partition_after_evaluation_interruption(t
     with pytest.raises(RuntimeError, match='interrupted'):
         data_preparation.materialize_preparation(recipe.pk, 'first', artifact_root=root,
                                                 catalog=default_catalog(), progress_callback=progress)
+    if interruption == 'partial_checkpoint':
+        first = next((root / 'preparation_steps').glob('*-training-1'))
+        incomplete = first.with_name(first.name[:-1] + '2')
+        incomplete.mkdir()
+        (incomplete / 'payload.pkl').write_bytes(b'incomplete publication without manifest')
     result = data_preparation.materialize_preparation(recipe.pk, 'retry', artifact_root=root,
                                                      catalog=default_catalog(), progress_callback=progress)
     assert calls == ([False, True, True] if interruption == 'evaluation' else [False, False, True])
     assert sum(update.get('label', '') == 'Paso 1 de 2 completado: center'
                for update in events) == 2  # once in training, once in evaluation
     assert result['frame_count'] == 3
+    prepared = FileArtifactStore(root).load(ArtifactRef.from_dict(result['artifact_ref']))
+    assert prepared['inputs'] == [0.0, 4.0, 196.0]
+    assert prepared['reserved_evaluation'] == [False, True, False]
 
 
 def test_large_execution_results_keep_resolved_data_in_the_artifact_store(
