@@ -42,10 +42,10 @@ class ExecutionObserver:
             key = (update.get('phase'), update.get('epoch'))
             now = monotonic()
             batch = update.get('batch_step')
-            if (batch is not None and batch not in (0, update.get('batch_total'))
+            if (update.get('status') != 'failed' and batch is not None and batch not in (0, update.get('batch_total'))
                     and key == last['key'] and now-last['time'] < 1):
                 return
             last.update(time=now, key=key)
-            self.emit(component=type(component).__name__, status='progress', **update)
+            self.emit(**{'component': type(component).__name__, 'status': 'progress', **update})
         setter(report if self.callback is not None else None)
         return setter

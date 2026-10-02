@@ -27,3 +27,15 @@ def test_completed_event_keeps_an_explicit_operation_label():
     observer = ExecutionObserver(events.append)
     observer.call(lambda: 1, '__call__')
     assert events[-1]['label'].endswith(': __call__ completado')
+
+
+def test_reflected_callback_accepts_component_failure_status():
+    events = []
+    class Adapter:
+        def set_progress_callback(self, callback):
+            self.callback = callback
+    adapter = Adapter()
+    ExecutionObserver(events.append).bind(adapter)
+    adapter.callback({'status': 'failed', 'phase': 'training', 'batch_step': 1,
+                      'batch_total': 4, 'failure_kind': 'nonfinite_loss'})
+    assert events[-1]['status'] == 'failed'

@@ -209,7 +209,7 @@ def _record_progress(job_id, update):
             'phase_step': step, 'phase_total': total, 'unit_label': progress.get('unit_label'),
             'message': message,
         }
-        event.update({key: progress[key] for key in ('schema_version', 'component', 'component_version', 'operation', 'status', 'span_id', 'duration_seconds', 'error_type', 'error_message', 'batch_step', 'batch_total', 'epoch', 'device', 'throughput') if key in progress})
+        event.update({key: progress[key] for key in ('schema_version', 'component', 'component_version', 'operation', 'status', 'span_id', 'duration_seconds', 'error_type', 'error_message', 'failure_kind', 'rnn_backend', 'batch_step', 'batch_total', 'epoch', 'device', 'throughput') if key in progress})
         if progress.get('batch_total'):
             event['message'] += f" · lote {progress.get('batch_step', 0)}/{progress['batch_total']}"
         trace.append(event)
@@ -438,7 +438,7 @@ def perform(job_id):
         try:
             last_progress = Job.objects.only('progress').get(pk=job_id).progress or {}
             _record_progress(job_id, {
-                'failure_context': {key: last_progress[key] for key in ('phase', 'epoch', 'batch_step', 'batch_total', 'checkpoint_epoch', 'device', 'component', 'operation') if key in last_progress},
+                'failure_context': {key: last_progress[key] for key in ('phase', 'epoch', 'batch_step', 'batch_total', 'checkpoint_epoch', 'device', 'component', 'operation', 'failure_kind', 'rnn_backend') if key in last_progress},
                 'phase': 'failed',
                 'label': f'Proceso fallido: {type(error).__name__}: {error}',
                 'phase_step': None, 'phase_total': None, 'unit_label': None,
