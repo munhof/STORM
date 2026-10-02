@@ -1293,6 +1293,40 @@ def test_preparation_fits_and_transforms_training_in_one_pass(
     assert calls == [(2, False, [0]), (2, True, None)]
 
 
+@pytest.mark.django_db
+def test_preparation_recovers_training_partition_after_evaluation_interruption(tmp_path, monkeypatch):
+    from storm.artifacts import FileArtifactStore
+    from storm.suite import default_catalog
+    from storm_studio import data_preparation
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
+
+    root = tmp_path / 'artifacts'
+    reference = FileArtifactStore(root).save(kind='datasets', artifact_id='partial-source',
+        value={'inputs': [2, 4, 100], 'partitions': ['train', 'train', 'test']})
+    dataset = Dataset.objects.create(name='Interrupted preparation')
+    source = DatasetRevision.objects.create(dataset=dataset, number=1,
+        connector='numeric_json', status='ready', artifact_ref=reference.to_dict())
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
+                                 dataset_revision=source)
+    recipe = Revision.objects.create(study=study, kind='preparation', payload={
+        'dataset_revision_id': source.pk, 'steps': [{'type': 'center'}]})
+    original = data_preparation.transform_aligned
+    calls = []
+    def interrupted(*args, **kwargs):
+        calls.append(kwargs.get('learned') is not None)
+        if kwargs.get('learned') is not None and len(calls) == 2:
+            raise RuntimeError('interrupted evaluation')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(data_preparation, 'transform_aligned', interrupted)
+    with pytest.raises(RuntimeError, match='interrupted evaluation'):
+        data_preparation.materialize_preparation(recipe.pk, 'first', artifact_root=root,
+                                                catalog=default_catalog())
+    result = data_preparation.materialize_preparation(recipe.pk, 'retry', artifact_root=root,
+                                                     catalog=default_catalog())
+    assert calls == [False, True, True]
+    assert result['frame_count'] == 3
+
+
 def test_large_execution_results_keep_resolved_data_in_the_artifact_store(
         settings, tmp_path, monkeypatch):
     from storm.artifacts import ArtifactRef

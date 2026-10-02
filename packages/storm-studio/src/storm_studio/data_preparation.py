@@ -204,11 +204,41 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
         'sessions', 'segments', 'partitions', 'reserved_evaluation') if key in data}
 
     training_stage_trace = []
-    prepared_train, fitted, selected_train = transform_aligned(
-        [inputs[i] for i in train_indices], train_indices, steps,
-        catalog=catalog, context_metadata=metadata,
-        stage_trace=training_stage_trace, progress_callback=progress_callback,
-        fit_observation_indices=fit_indices)
+    checkpoint_id = f'preparation-{recipe.pk}-{recipe_fingerprint.removeprefix("sha256:")}-training'
+    try:
+        checkpoint = store.load(store.resolve(kind='preparation_checkpoints',
+                                             artifact_id=checkpoint_id))
+    except FileNotFoundError:
+        checkpoint = None
+    if checkpoint is not None:
+        if (checkpoint.get('fingerprint') != recipe_fingerprint
+                or checkpoint.get('train_indices') != train_indices
+                or checkpoint.get('fit_indices') != fit_indices):
+            raise ValueError('Preparation checkpoint does not match the training partition.')
+        prepared_train = checkpoint['inputs']
+        fitted = checkpoint['fitted']
+        selected_train = checkpoint['selected']
+        training_stage_trace = checkpoint['stage_trace']
+        if progress_callback is not None:
+            progress_callback({'label': 'Entrenamiento preparado recuperado; continuando con evaluación',
+                               'checkpoint_saved': True,
+                               'recovered_from_execution_id': checkpoint['execution_id']})
+    else:
+        prepared_train, fitted, selected_train = transform_aligned(
+            [inputs[i] for i in train_indices], train_indices, steps,
+            catalog=catalog, context_metadata=metadata,
+            stage_trace=training_stage_trace, progress_callback=progress_callback,
+            fit_observation_indices=fit_indices)
+        store.save(kind='preparation_checkpoints', artifact_id=checkpoint_id, value={
+            'fingerprint': recipe_fingerprint, 'train_indices': train_indices,
+            'fit_indices': fit_indices, 'inputs': prepared_train, 'fitted': fitted,
+            'selected': selected_train, 'stage_trace': training_stage_trace,
+            'execution_id': execution_id}, metadata={
+                'schema_version': 1, 'source_dataset_revision': source.pk,
+                'preparation_revision': recipe.pk, 'step_versions': step_versions})
+        if progress_callback is not None:
+            progress_callback({'label': 'Punto de recuperación de preparación guardado: entrenamiento',
+                               'checkpoint_saved': True})
     evaluation_stage_trace = []
     if evaluation_indices:
         prepared_evaluation, _, selected_evaluation = transform_aligned(
