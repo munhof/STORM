@@ -331,17 +331,6 @@ def _binary_probability_histogram(result, mask):
             'threshold_x': round(50 + threshold * 600) if threshold is not None else None}
 
 
-def _session_local_state_summary(result):
-    metadata = result.get('output_metadata') or {}
-    if metadata.get('discretizer_scope') not in {'session_local', 'per_session'}:
-        return False
-    data = result.get('resolved_data') or {}
-    sessions = data.get('sessions') or []
-    indices = result.get('indices') or []
-    return len({str(sessions[index]) for index in indices
-                if type(index) is int and 0 <= index < len(sessions)}) > 1
-
-
 def _report_visuals(result):
     """Build small, dependency-free SVG chart data for one execution result."""
     from collections import Counter
@@ -381,7 +370,7 @@ def _report_visuals(result):
                 count for _, count in top)
             counts = Counter(top)
             counts['Otras categorías'] = other_count
-    state_scope_warning = _session_local_state_summary(result)
+    state_scope_warning = services.session_local_state_summary(result)
     if state_scope_warning:
         counts.clear()
     maximum_count = max(counts.values(), default=0)
@@ -467,7 +456,7 @@ def _state_diagnostics(result):
 
     capabilities = result.get('capabilities') or []
     output_metadata = result.get('output_metadata') or {}
-    if (_session_local_state_summary(result) or ('group' not in capabilities
+    if (services.session_local_state_summary(result) or ('group' not in capabilities
             and 'state' not in str(output_metadata.get('semantics', '')).lower())):
         return {'state_transitions': [], 'state_durations': [],
                 'state_duration_histogram': {'bins': [], 'states': [], 'height': 240},

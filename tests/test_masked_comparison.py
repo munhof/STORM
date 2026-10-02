@@ -130,3 +130,17 @@ def test_group_stability_uses_permutation_invariant_ari_for_same_data():
     assert result['value'] == 1.0
     assert result['observations'] == 6
     assert 'No mide concordancia humana' in result['interpretation']
+
+
+def test_group_stability_does_not_pool_session_local_discretizers():
+    first, second = run([True] * 3, [0, 0, 1]), run([True] * 3, [0, 0, 1])
+    for job in (first, second):
+        job.result.update(capabilities=['group'], predictions=[0, 0, 1],
+                          prediction_mask=[True] * 3)
+        job.result['resolved_data']['sessions'] = ['a', 'a', 'b']
+        job.result['output_metadata']['discretizer_scope'] = 'session_local'
+    assert compare_group_stability([first, second]) is None
+    assert 'session-local state IDs cannot be pooled across sessions' in compare_reasons([first, second])
+    for job in (first, second):
+        job.result['output_metadata']['discretizer_scope'] = 'shared_training_model'
+    assert compare_group_stability([first, second])['value'] == 1.0

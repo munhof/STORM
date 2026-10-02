@@ -696,11 +696,24 @@ def comparable(jobs):
     return not compare_reasons(jobs)
 
 
+def session_local_state_summary(result):
+    metadata = result.get('output_metadata') or {}
+    if metadata.get('discretizer_scope') not in {'session_local', 'per_session'}:
+        return False
+    data = result.get('resolved_data') or {}
+    sessions = data.get('sessions') or []
+    indices = result.get('indices') or []
+    return len({str(sessions[index]) for index in indices
+                if type(index) is int and 0 <= index < len(sessions)}) > 1
+
+
 def compare_group_stability(jobs):
     """Compare two grouping runs with permutation-invariant adjusted Rand index."""
     if len(jobs) != 2:
         return None
     first, second = [job.result if isinstance(job.result, dict) else {} for job in jobs]
+    if any(session_local_state_summary(result) for result in (first, second)):
+        return None
     if any('group' not in result.get('capabilities', []) for result in (first, second)):
         return None
     fingerprint = first.get('data_fingerprint')
@@ -769,6 +782,8 @@ def compare_reasons(jobs):
         return ['Select at least two completed executions']
     reasons = []
     results = [job.result if isinstance(job.result, dict) else {} for job in jobs]
+    if any(session_local_state_summary(result) for result in results):
+        reasons.append('session-local state IDs cannot be pooled across sessions')
     data_summaries = []
     for result in results:
         summary = result.get('resolved_data_summary')
