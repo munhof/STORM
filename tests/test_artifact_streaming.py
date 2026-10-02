@@ -1,6 +1,25 @@
 import pytest
 
 
+class UnserializableCheckpoint:
+    def __reduce__(self):
+        raise RuntimeError('serialization interrupted')
+
+
+def test_failed_checkpoint_serialization_keeps_previous_artifact(tmp_path):
+    from storm.artifacts import FileArtifactStore
+
+    store = FileArtifactStore(tmp_path)
+    reference = store.save(kind='checkpoints', artifact_id='continuation',
+                           value={'epoch': 1, 'optimizer': {'step': 10}})
+    with pytest.raises(RuntimeError, match='serialization interrupted'):
+        store.save(kind='checkpoints', artifact_id='continuation',
+                   value=UnserializableCheckpoint())
+    assert store.load(reference) == {'epoch': 1, 'optimizer': {'step': 10}}
+    assert {path.name for path in (tmp_path / reference.uri).iterdir()} == {
+        'payload.pkl', 'manifest.json'}
+
+
 def test_artifact_round_trip_avoids_full_payload_byte_buffers(tmp_path, monkeypatch):
     from pathlib import Path
     from storm.artifacts import FileArtifactStore
