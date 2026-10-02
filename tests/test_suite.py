@@ -29,6 +29,43 @@ class NativePreparationOnlyModel:
         return ModelOutput(list(inputs))
 
 
+class ScopedGroupInference:
+    def __init__(self, config):
+        self.scope = config['scope']
+
+    def predict(self, inputs):
+        from storm import ModelOutput
+        return ModelOutput([0] * len(inputs), {'discretizer_scope': self.scope})
+
+    def fit_predict(self, inputs, constraints=()):
+        return self.predict(inputs)
+
+
+class ScopedClusteringMetric:
+    compatible_task = 'clustering'
+
+    def evaluate(self, **_kwargs):
+        return 1.0
+
+
+def test_inference_metrics_do_not_pool_session_local_states(tmp_path):
+    from storm.suite import Component, default_catalog, execute
+
+    catalog = default_catalog()
+    catalog.register(Component('scoped-group', ScopedGroupInference, ('group', 'infer'),
+                               {'type': 'object', 'properties': {'scope': {'type': 'string'}}}))
+    catalog.metrics.register('scoped-score', ScopedClusteringMetric(), direction='maximize')
+    spec = {'model': 'scoped-group', 'operation': 'infer',
+            'config': {'scope': 'session_local'}, 'metrics': ['scoped-score'],
+            'data': {'inputs': [1, 2], 'targets': [0, 1], 'train': [], 'test': [0, 1],
+                     'sessions': ['a', 'b']}}
+    result = execute(spec, tmp_path, 'local-inference', catalog)
+    assert result['metrics'] == {}
+    assert 'locales por sesión' in result['metric_reason']
+    spec['config']['scope'] = 'shared_training_model'
+    assert execute(spec, tmp_path, 'shared-inference', catalog)['metrics'] == {'scoped-score': 1.0}
+
+
 def test_training_does_not_fit_on_evaluation_data(tmp_path):
     from storm.suite import execute, infer
     spec = {'model': 'mean_regressor', 'config': {}, 'seed': 42,

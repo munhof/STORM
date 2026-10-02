@@ -801,6 +801,15 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
                 compatible = compatible_task in (None, 'regression')
             if compatible:
                 metric_names.append(name)
+    metric_sessions = data.get('sessions') or []
+    if (is_group_model
+            and output.metadata.get('discretizer_scope') in {'session_local', 'per_session'}
+            and len({str(metric_sessions[index]) for index in metric_indices
+                     if 0 <= index < len(metric_sessions)}) > 1):
+        metric_names = []
+        metric_reason = (
+            'Los estados son locales por sesión; no se calculan métricas globales '
+            'mezclando IDs de discretizadores independientes.')
     if is_group_model and operation != 'infer':
         metric_names = []
         metric_reason = (
