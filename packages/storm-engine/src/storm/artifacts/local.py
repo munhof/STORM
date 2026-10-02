@@ -38,8 +38,19 @@ class FileArtifactStore:
     ) -> ArtifactRef:
         location = self._location(kind=kind, artifact_id=artifact_id)
         location.mkdir(parents=True, exist_ok=True)
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=location, delete=False) as handle:
+                temporary_path = handle.name
+                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.seek(0)
+                digest = self._payload_digest(handle)
+            os.replace(temporary_path, location / 'payload.pkl')
+        finally:
+            if temporary_path is not None and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
         reference = ArtifactRef(
             artifact_id=artifact_id,
             kind=kind,
@@ -52,7 +63,6 @@ class FileArtifactStore:
             "serializer": "pickle",
             "metadata": json_compatible(dict(metadata or {})),
         }
-        self._atomic_write(location / "payload.pkl", payload)
         self._atomic_write(
             location / "manifest.json",
             json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
@@ -66,11 +76,18 @@ class FileArtifactStore:
                 f"Artifact reference for '{reference.artifact_id}' does not match its manifest."
             )
         payload_path = self.root / resolved.uri / "payload.pkl"
-        payload = payload_path.read_bytes()
-        actual_digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
-        if actual_digest != resolved.digest:
-            raise ValueError(f"Artifact '{reference.artifact_id}' failed digest verification.")
-        return pickle.loads(payload)
+        with payload_path.open('rb') as handle:
+            if self._payload_digest(handle) != resolved.digest:
+                raise ValueError(f"Artifact '{reference.artifact_id}' failed digest verification.")
+            handle.seek(0)
+            return pickle.load(handle)
+
+    @staticmethod
+    def _payload_digest(handle) -> str:
+        digest = hashlib.sha256()
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+        return f'sha256:{digest.hexdigest()}'
 
     def resolve(self, *, kind: str, artifact_id: str) -> ArtifactRef:
         location = self._location(kind=kind, artifact_id=artifact_id)
