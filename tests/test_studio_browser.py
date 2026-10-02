@@ -16,6 +16,7 @@ def test_execution_progress_updates_without_reloading_the_page(live_server, tmp_
     })
     job = Job.objects.create(
         revision=plan, status='running', operation='train', started=timezone.now(),
+        logs=[{'timestamp': timezone.now().isoformat(), 'message': 'Preparación iniciada'}],
         progress={
             'phase': 'loading', 'label': 'Cargando datos registrados',
             'stage_index': 1, 'stage_total': 5, 'updated_at': timezone.now().isoformat(),
@@ -28,18 +29,28 @@ def test_execution_progress_updates_without_reloading_the_page(live_server, tmp_
         expect(page.locator('[data-progress-label]')).to_have_text(
             'Cargando datos registrados')
         expect(page.locator('[data-execution-summary]')).to_have_text('1 en curso')
+        expect(page.locator('[data-job-logs-summary]')).to_have_text(
+            'Últimos logs del proceso y sus avances (2)')
+        expect(page.locator('[data-job-logs]')).to_contain_text('Preparación iniciada')
         original_url = page.url
         database.submit(Job.objects.filter(pk=job.pk).update, progress={
             'phase': 'training', 'label': 'Entrenando el modelo · época 2 de 10',
             'stage_index': 3, 'stage_total': 5, 'phase_step': 2,
-            'phase_total': 10, 'fraction': 0.2, 'eta_seconds': 80,
+            'phase_total': 10, 'unit_label': 'épocas',
+            'fraction': 0.2, 'eta_seconds': 80,
             'updated_at': timezone.now().isoformat(),
-        }).result()
+        }, logs=[
+            {'timestamp': timezone.now().isoformat(), 'message': 'Preparación iniciada'},
+            {'timestamp': timezone.now().isoformat(), 'message': 'Época 2 completada'},
+        ]).result()
         expect(page.locator('[data-progress-label]')).to_have_text(
             'Entrenando el modelo · época 2 de 10')
         expect(page.locator('[data-progress-detail]')).to_contain_text('20%')
         expect(page.locator('[data-progress-detail]')).to_contain_text('restan 8 épocas')
         expect(page.locator('[data-eta-text]')).to_contain_text('1 min')
+        expect(page.locator('[data-job-logs-summary]')).to_have_text(
+            'Últimos logs del proceso y sus avances (3)')
+        expect(page.locator('[data-job-logs]')).to_contain_text('Época 2 completada')
         assert page.url == original_url
         browser.close()
 
@@ -136,9 +147,11 @@ def test_frozen_report_can_be_created_and_downloaded_from_reports_page(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(f'{live_server.url}/studies/{study.pk}/reports/')
+        page.get_by_text('Congelar evidencia reproducible', exact=True).click()
         page.locator(f'input[name="jobs"][value="{job.pk}"]').check()
         page.locator('#report-snapshot').select_option(str(snapshot.pk))
         page.get_by_role('button', name='Congelar reporte').click()
+        page.get_by_text('Reportes guardados', exact=True).click()
         expect(page.get_by_role('heading', name='Reportes congelados')).to_be_visible()
         with page.expect_download() as download_event:
             page.locator('a[href*="/reports/frozen/"][href$="/json/"]').click()
@@ -157,6 +170,7 @@ def test_frozen_report_can_be_created_and_downloaded_from_reports_page(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(f'{live_server.url}/studies/{study.pk}/reports/')
+        page.get_by_text('Reportes guardados', exact=True).click()
         with page.expect_download() as bundle_event:
             page.get_by_role('link', name='Paquete ZIP').click()
         bundle = bundle_event.value
@@ -167,6 +181,69 @@ def test_frozen_report_can_be_created_and_downloaded_from_reports_page(
     with zipfile.ZipFile(bundle_path) as archive:
         manifest = json.loads(archive.read('bundle_manifest.json'))
         assert manifest['report_revision_id'] == frozen_id
+
+
+@pytest.mark.django_db(transaction=True)
+def test_analysis_feature_selector_redraws_pose_series_in_browser(live_server):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Pose feature evidence')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'classifier'})
+    Job.objects.create(revision=plan, status='completed', result={
+        'model': 'classifier', 'indices': [0, 1, 2], 'predictions': [0, 1, 1],
+        'prediction_mask': [True, True, True],
+        'output_metadata': {'task': 'classification', 'semantics': 'behavior_classification'},
+        'resolved_data': {
+            'inputs': [[1.0, 9.0], [2.0, 7.0], [4.0, 1.0]],
+            'feature_names': ['nose_x', 'nose_y'], 'targets': [0, 1, 1],
+        },
+    })
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={'width': 1280, 'height': 900})
+        page.goto(f'{live_server.url}/studies/{study.pk}/evidence/')
+        selector = page.locator('#evidence-feature-select')
+        expect(selector).to_be_visible()
+        before = page.locator('#raw-view polyline').get_attribute('points')
+        selector.select_option('1')
+        after = page.locator('#raw-view polyline').get_attribute('points')
+        assert before != after
+        expect(page.locator('.table-scroll table')).to_contain_text('nose_x')
+        browser.close()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_state_report_opens_colored_charts_and_raw_episode_table(live_server):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='State report visuals')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'vame_native'})
+    Job.objects.create(revision=plan, status='completed', result={
+        'model': 'vame_native', 'capabilities': ['group'], 'indices': list(range(7)),
+        'predictions': [0, 0, 1, 1, 1, 0, 2], 'prediction_mask': [True] * 7,
+        'resolved_data': {
+            'inputs': [[0]] * 7, 'sessions': ['mouse'] * 7,
+            'segments': ['clip'] * 7, 'frames': list(range(7)),
+        },
+    })
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={'width': 1280, 'height': 900})
+        page.goto(f'{live_server.url}/studies/{study.pk}/reports/')
+        histogram = page.locator('#state-duration-histogram')
+        expect(histogram).to_be_visible()
+        assert histogram.locator('rect').count() == 6
+        assert page.locator('#state-transition-matrix tbody td').count() == 9
+        first_cell = page.locator('#state-transition-matrix tbody td').first
+        assert 'rgba(' in first_cell.get_attribute('style')
+        page.get_by_text('Ver tabla de valores por episodio', exact=True).click()
+        expect(page.locator('#state-bouts-table')).to_contain_text('Frame inicial')
+        expect(page.locator('#state-bouts-table')).to_contain_text('mouse')
+        browser.close()
 
 
 @pytest.mark.django_db(transaction=True)

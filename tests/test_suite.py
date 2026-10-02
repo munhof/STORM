@@ -181,6 +181,21 @@ def test_aligned_transform_keeps_empty_evaluation_partitions_empty():
     assert indices == []
 
 
+def test_aligned_transform_reports_real_step_progress():
+    from storm.suite import transform_aligned
+
+    progress = []
+    prepared, _, _ = transform_aligned(
+        [1.0, 2.0], [0, 1], [{'type': 'scale', 'factor': 2}],
+        progress_callback=progress.append)
+
+    assert prepared == [2.0, 4.0]
+    assert [item['phase_step'] for item in progress if 'phase_step' in item] == [0, 1]
+    assert [item['status'] for item in progress if 'status' in item] == ['started', 'completed']
+    assert all(item['phase_total'] == 1 for item in progress if 'phase_total' in item)
+    assert all(item['unit_label'] == 'pasos de preparación' for item in progress if 'unit_label' in item)
+
+
 def test_catalog_validates_required_types_ranges_and_defaults():
     from storm.suite import Catalog, Component
 

@@ -7,6 +7,7 @@ from storm.metrics.registry import MetricRegistry
 
 class Accuracy:
     """Fraction of predictions equal to their supervised targets."""
+    compatible_task = 'classification'
 
     def evaluate(self, *, dataset: Any, output: Any, model: Any) -> float:
         targets, predictions = _paired_values(dataset, output)
@@ -18,6 +19,7 @@ class Accuracy:
 
 class MeanAbsoluteError:
     """Arithmetic mean of absolute prediction errors."""
+    compatible_task = 'regression'
 
     def evaluate(self, *, dataset: Any, output: Any, model: Any) -> float:
         targets, predictions = _paired_numbers(dataset, output)
@@ -29,6 +31,7 @@ class MeanAbsoluteError:
 
 class MeanSquaredError:
     """Arithmetic mean of squared prediction errors."""
+    compatible_task = 'regression'
 
     def evaluate(self, *, dataset: Any, output: Any, model: Any) -> float:
         targets, predictions = _paired_numbers(dataset, output)
@@ -40,7 +43,7 @@ class MeanSquaredError:
 
 def register_classic_metrics(registry: MetricRegistry) -> None:
     """Register the dependency-free classic metric catalog."""
-    registry.register("accuracy", Accuracy())
+    registry.register("accuracy", Accuracy(), direction='maximize')
     registry.register("mae", MeanAbsoluteError())
     registry.register("mse", MeanSquaredError())
 

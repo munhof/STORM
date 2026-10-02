@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 
 from storm.artifacts import ArtifactRef, FileArtifactStore
 from storm.config import fingerprint
@@ -39,7 +41,10 @@ def resolve_preparation_steps(steps, feature_names):
             center_indices = _bodypart_pair(current_features, center)
             pairs = [_bodypart_pair(current_features, name) for name in bodyparts or []]
             config = {'center_indices': center_indices, 'coordinate_pairs': pairs}
+            if 'device' in item.get('config', {}):
+                config['device'] = item['config']['device']
         elif step_type == 'pose.orient_coordinates' and 'from_bodypart' in config:
+            requested_device = config.get('device')
             bodyparts = list(dict.fromkeys(
                 name[:-2] for name in current_features
                 if name.endswith('_x') and f'{name[:-2]}_y' in current_features))
@@ -56,6 +61,8 @@ def resolve_preparation_steps(steps, feature_names):
                 'degenerate_reference_policy': config.get(
                     'degenerate_reference_policy', 'error'),
             }
+            if requested_device is not None:
+                config['device'] = requested_device
         elif step_type == 'pose.likelihood_filter' and 'bodyparts' in config:
             pairs = [_bodypart_pair(current_features, name)
                      for name in config.get('bodyparts') or []]
@@ -89,7 +96,7 @@ def _step_versions(steps, catalog):
     return versions
 
 
-def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog):
+def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog, progress_callback=None):
     recipe = Revision.objects.select_related('study').get(
         pk=revision_id, kind='preparation')
     source = DatasetRevision.objects.get(
@@ -101,27 +108,17 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
         raise ValueError('The source dataset has no inspected artifact to prepare.')
 
     store = FileArtifactStore(artifact_root)
-    data = store.load(ArtifactRef.from_dict(source.artifact_ref))
-    if not isinstance(data, dict) or not isinstance(data.get('inputs'), list) or not data['inputs']:
-        raise ValueError('The source artifact must contain a nonempty inputs list.')
-    inputs = data['inputs']
-    count = len(inputs)
-    partitions = data.get('partitions') or ['unassigned'] * count
-    reserved = data.get('reserved_evaluation') or [False] * count
-    if len(partitions) != count or len(reserved) != count:
-        raise ValueError('Partition and reservation metadata must align with inputs.')
-    for key in ALIGNED_FIELDS:
-        if key in data and data[key] is not None and len(data[key]) != count:
-            raise ValueError(f'{key} must align with inputs.')
-
-    train_indices = [i for i, partition in enumerate(partitions) if partition == 'train']
-    train_set = set(train_indices)
-    fit_indices = [i for i in train_indices if not reserved[i]]
-    if not fit_indices:
-        raise ValueError('Assign at least one unreserved observation to training.')
-    evaluation_indices = [i for i in range(count) if i not in train_set or reserved[i]]
-    steps = resolve_preparation_steps(recipe.payload.get('steps', []),
-                                      data.get('feature_names', []))
+    data = None
+    feature_names = source.inventory.get('feature_names', [])
+    source_count = source.inventory.get('frame_count')
+    if not isinstance(feature_names, list) or not feature_names:
+        data = store.load(ArtifactRef.from_dict(source.artifact_ref))
+        if (not isinstance(data, dict) or not isinstance(data.get('inputs'), list)
+                or not data['inputs']):
+            raise ValueError('The source artifact must contain a nonempty inputs list.')
+        feature_names = data.get('feature_names', [])
+        source_count = len(data['inputs'])
+    steps = resolve_preparation_steps(recipe.payload.get('steps', []), feature_names)
     step_versions = _step_versions(steps, catalog)
     recipe_fingerprint = fingerprint({
         'source': source.artifact_ref, 'steps': steps, 'step_versions': step_versions})
@@ -140,6 +137,68 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
             'artifact_ref': existing.artifact_ref,
             'reused': True,
         }
+    if type(source_count) is not int or source_count < 1:
+        if data is None:
+            data = store.load(ArtifactRef.from_dict(source.artifact_ref))
+        source_count = len(data.get('inputs') or [])
+    recovered = _recover_orphan_preparation(
+        store, artifact_root, source=source, recipe=recipe, steps=steps,
+        step_versions=step_versions, recipe_fingerprint=recipe_fingerprint,
+        source_observation_count=source_count)
+    if recovered:
+        artifact_ref, prepared, recovered_execution = recovered
+        dataset = source.dataset
+        next_number = (DatasetRevision.objects.filter(dataset=dataset)
+                       .order_by('-number').values_list('number', flat=True).first() or 0) + 1
+        pose_preview_store = write_pose_preview_store(
+            _pose_preview_data(prepared, steps), root=artifact_root,
+            artifact_id=f'pose-preview-prepared-{dataset.pk}-r{next_number}')
+        summary = _inventory(
+            _pose_preview_data(prepared, steps), source.inventory, recipe_fingerprint,
+            pose_preview_store=pose_preview_store)
+        stage_preview = (prepared.get('preparation') or {}).get('stage_preview', [])
+        summary['preparation_stage_preview'] = stage_preview
+        derived = DatasetRevision.objects.create(
+            dataset=dataset, number=next_number, connector='prepared_artifact',
+            asset_ids=source.asset_ids,
+            config={
+                'source_dataset_revision_id': source.pk,
+                'preparation_revision_id': recipe.pk,
+                'preparation_fingerprint': recipe_fingerprint,
+                'step_versions': step_versions,
+                'recovered_artifact': True,
+                'recovered_from_execution_id': recovered_execution,
+            },
+            status='ready', inventory=summary, artifact_ref=artifact_ref.to_dict())
+        return {
+            'prepared_dataset_revision_id': derived.pk,
+            'source_dataset_revision_id': source.pk,
+            'preparation_revision_id': recipe.pk,
+            'preparation_fingerprint': recipe_fingerprint,
+            'frame_count': len(prepared['inputs']),
+            'artifact_ref': artifact_ref.to_dict(),
+            'recovered': True,
+            'recovered_from_execution_id': recovered_execution,
+        }
+    if data is None:
+        data = store.load(ArtifactRef.from_dict(source.artifact_ref))
+    if not isinstance(data, dict) or not isinstance(data.get('inputs'), list) or not data['inputs']:
+        raise ValueError('The source artifact must contain a nonempty inputs list.')
+    inputs = data['inputs']
+    count = len(inputs)
+    partitions = data.get('partitions') or ['unassigned'] * count
+    reserved = data.get('reserved_evaluation') or [False] * count
+    if len(partitions) != count or len(reserved) != count:
+        raise ValueError('Partition and reservation metadata must align with inputs.')
+    for key in ALIGNED_FIELDS:
+        if key in data and data[key] is not None and len(data[key]) != count:
+            raise ValueError(f'{key} must align with inputs.')
+    train_indices = [i for i, partition in enumerate(partitions) if partition == 'train']
+    train_set = set(train_indices)
+    fit_indices = [i for i in train_indices if not reserved[i]]
+    if not fit_indices:
+        raise ValueError('Assign at least one unreserved observation to training.')
+    evaluation_indices = [i for i in range(count) if i not in train_set or reserved[i]]
     metadata = {key: data[key] for key in (
         'feature_names', 'taxonomy', 'likelihood_bodyparts', 'likelihoods', 'frames',
         'sessions', 'segments', 'partitions', 'reserved_evaluation') if key in data}
@@ -148,14 +207,14 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
     prepared_train, fitted, selected_train = transform_aligned(
         [inputs[i] for i in train_indices], train_indices, steps,
         catalog=catalog, context_metadata=metadata,
-        stage_trace=training_stage_trace,
+        stage_trace=training_stage_trace, progress_callback=progress_callback,
         fit_observation_indices=fit_indices)
     evaluation_stage_trace = []
     if evaluation_indices:
         prepared_evaluation, _, selected_evaluation = transform_aligned(
             [inputs[i] for i in evaluation_indices], evaluation_indices, steps,
             learned=fitted, catalog=catalog, context_metadata=metadata,
-            stage_trace=evaluation_stage_trace)
+            stage_trace=evaluation_stage_trace, progress_callback=progress_callback)
     else:
         prepared_evaluation, selected_evaluation = [], []
         evaluation_stage_trace = [
@@ -250,10 +309,11 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
                   'preparation_fingerprint': recipe_fingerprint,
                   'step_versions': step_versions,
                   'execution_id': str(execution_id)})
+    preview_data = _pose_preview_data(prepared, steps)
     pose_preview_store = write_pose_preview_store(
-        prepared, root=artifact_root,
+        preview_data, root=artifact_root,
         artifact_id=f'pose-preview-prepared-{dataset.pk}-r{next_number}')
-    summary = _inventory(prepared, source.inventory, recipe_fingerprint,
+    summary = _inventory(preview_data, source.inventory, recipe_fingerprint,
                          pose_preview_store=pose_preview_store)
     summary['preparation_stage_preview'] = stage_preview
     derived = DatasetRevision.objects.create(
@@ -279,6 +339,79 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
         'frame_count': len(prepared['inputs']),
         'artifact_ref': artifact_ref.to_dict(),
     }
+
+
+def _recover_orphan_preparation(store, artifact_root, *, source, recipe, steps,
+                                step_versions, recipe_fingerprint,
+                                source_observation_count):
+    """Find and validate a complete artifact written before its DB revision."""
+    artifact_root = Path(artifact_root)
+    datasets_root = artifact_root / 'datasets'
+    prefix = f'prepared-dataset-{source.dataset_id}-r'
+    if not datasets_root.is_dir():
+        return None
+    candidates = []
+    for path in datasets_root.glob(f'{prefix}*'):
+        try:
+            number = int(path.name[len(prefix):])
+        except ValueError:
+            continue
+        candidates.append((number, path.name))
+    for _, artifact_id in sorted(candidates, reverse=True):
+        try:
+            manifest_path = datasets_root / artifact_id / 'manifest.json'
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            metadata = manifest.get('metadata') or {}
+            if (metadata.get('source_dataset_revision') != source.pk
+                    or metadata.get('preparation_revision') != recipe.pk
+                    or metadata.get('preparation_fingerprint') != recipe_fingerprint
+                    or metadata.get('step_versions') != step_versions):
+                continue
+            reference = store.resolve(kind='datasets', artifact_id=artifact_id)
+            value = store.load(reference)
+            preparation = value.get('preparation') if isinstance(value, dict) else None
+            if (not isinstance(value, dict) or not isinstance(value.get('inputs'), list)
+                    or not value['inputs'] or not isinstance(preparation, dict)
+                    or preparation.get('revision_id') != recipe.pk
+                    or preparation.get('source_dataset_revision_id') != source.pk
+                    or preparation.get('fingerprint') != recipe_fingerprint
+                    or preparation.get('step_versions') != step_versions):
+                continue
+            count = len(value['inputs'])
+            if any(key in value and value[key] is not None and len(value[key]) != count
+                   for key in ALIGNED_FIELDS):
+                continue
+            source_indices = preparation.get('source_observation_indices')
+            if (not isinstance(source_indices, list) or len(source_indices) != count
+                    or any(type(index) is not int
+                           or not 0 <= index < source_observation_count
+                           for index in source_indices)):
+                continue
+            return reference, value, metadata.get('execution_id',
+                                                   preparation.get('execution_id', ''))
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def _pose_preview_data(data, steps):
+    """Project temporal windows to their center frame for frame-level visuals."""
+    temporal = next((step for step in reversed(steps)
+                     if step.get('type') == 'pose.temporal_windows'), None)
+    if temporal is None:
+        return data
+    inputs = data.get('inputs') or []
+    if not inputs or not isinstance(inputs[0], (list, tuple)) or not inputs[0] \
+            or not isinstance(inputs[0][0], (list, tuple)):
+        return data
+    offsets = (temporal.get('config') or {}).get('offsets') or []
+    center = offsets.index(0) if 0 in offsets else len(inputs[0]) // 2
+    if any(not isinstance(row, (list, tuple)) or center >= len(row)
+           or not isinstance(row[center], (list, tuple)) for row in inputs):
+        return data
+    projected = dict(data)
+    projected['inputs'] = [row[center] for row in inputs]
+    return projected
 
 
 def _inventory(data, source_inventory, source_fingerprint, *, pose_preview_store=None):

@@ -19,9 +19,15 @@
   <table><thead><tr><th>Métrica</th><th>Valor</th></tr></thead><tbody>
     {% for name,value in run.result.metrics.items %}<tr><td>{{ name }}</td><td>{{ value }}</td></tr>{% empty %}<tr><td colspan="2">Sin métricas declaradas.</td></tr>{% endfor %}
   </tbody></table>
+  <h3>Lecturas y preguntas del investigador</h3>
+  {% for analysis in run.analyses %}<section><p>{{ analysis.created }} · {% if analysis.payload.assessment == 'continue' %}avanzar{% elif analysis.payload.assessment == 'refine' %}ajustar{% else %}sin decisión todavía{% endif %} · muestra de {{ analysis.payload.sample_count }} observaciones</p>
+    {% if analysis.payload.question %}<p><strong>Pregunta:</strong> {{ analysis.payload.question }}</p>{% endif %}
+    {% if analysis.payload.interpretation %}<p><strong>Interpretación:</strong> {{ analysis.payload.interpretation }}</p>{% endif %}
+    <ul>{% for metric in analysis.payload.metrics %}<li>{{ metric.name }}: {{ metric.value|floatformat:4 }} ({{ metric.direction }})</li>{% empty %}<li>{{ analysis.payload.metric_reason|default:'No se guardaron métricas para esta revisión.' }}</li>{% endfor %}</ul>
+  </section>{% empty %}<p>No hay análisis guardados para esta corrida.</p>{% endfor %}
   <h3>Revisiones humanas</h3>
   {% for annotation in run.annotations %}<p>Revisión {{ annotation.revision_id }} · {{ annotation.payload.author }} · {{ annotation.payload.reason }} · {% if annotation.applies_to_run %}fingerprint coincidente{% else %}fingerprint distinto; sólo historial{% endif %}</p>{% empty %}<p>Sin anotaciones humanas vinculadas a esta corrida.</p>{% endfor %}
 </article>
 {% endfor %}
-<section><h2>Manifiesto completo</h2><pre>{{ manifest }}</pre></section>
+<details><summary>Manifiesto completo</summary><pre>{{ manifest }}</pre></details>
 </html>

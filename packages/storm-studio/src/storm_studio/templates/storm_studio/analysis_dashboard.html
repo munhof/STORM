@@ -1,0 +1,41 @@
+<section class="card" id="analysis-dashboard" aria-labelledby="analysis-dashboard-title">
+  <h2 id="analysis-dashboard-title">Resultado para decidir</h2>
+  <p><strong>{{ selected.result.model }}</strong> · corrida {{ selected.pk }} · partición {{ selected.result.partition|default:'desconocida' }}</p>
+  {% if evidence_visuals.prediction_scope_count %}<p><strong>{{ evidence_visuals.valid_prediction_count }} de {{ evidence_visuals.prediction_scope_count }} observaciones evaluadas tienen una salida válida</strong> ({{ evidence_visuals.prediction_coverage }}% de cobertura en esta corrida). {{ evidence_visuals.labeled_observation_count }} tienen etiqueta de referencia dentro de la máscara de evaluación; {{ evidence_visuals.excluded_prediction_count }} salidas quedaron excluidas.{% if evidence_visuals.outside_run_count %} Otras {{ evidence_visuals.outside_run_count }} observaciones del dataset están fuera de esta corrida y no cuentan como fallos de inferencia.{% endif %}</p>{% else %}<p>Esta ejecución histórica no conserva observaciones suficientes para estimar la cobertura.</p>{% endif %}
+  {% if evidence_visuals.taxonomy_alignment_warning %}<section class="card" role="status"><strong>Interpretación pendiente:</strong> las clases del modelo no tienen correspondencia declarada con las conductas del benchmark. Las métricas de etiquetas no permiten decidir si el modelo reconoce esas conductas hasta registrar esa correspondencia.</section>{% endif %}
+  <p>La corrida conserva su evaluación original; las métricas de abajo son un análisis exploratorio.</p>
+
+  <form method="get" aria-label="Calcular métricas registradas">
+    <input type="hidden" name="job" value="{{ selected.pk }}">
+    <h3>Métricas exploratorias</h3>
+    <fieldset>
+      <legend>Métricas compatibles registradas</legend>
+      {% for metric in analysis_metrics.choices %}
+      <label><input type="checkbox" name="metric" value="{{ metric }}"{% if metric in analysis_metrics.selected %} checked{% endif %}> {{ metric }}</label>
+      {% empty %}<p>No hay métricas compatibles con la tarea de esta salida.</p>{% endfor %}
+    </fieldset>
+    <button{% if not analysis_metrics.choices %} disabled{% endif %}>Calcular sobre etiquetas válidas</button>
+  </form>
+  {% if analysis_metrics.rows %}
+  <p>Calculadas con {{ analysis_metrics.sample_count }} observaciones etiquetadas y predichas.</p>
+  <table><thead><tr><th>Métrica</th><th>Resultado</th><th>Dirección declarada</th></tr></thead><tbody>
+    {% for metric in analysis_metrics.rows %}<tr><th scope="row">{{ metric.name }}</th><td>{{ metric.value|floatformat:4 }}</td><td>{{ metric.direction }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% elif analysis_metrics.reason %}<p role="status">{{ analysis_metrics.reason }}</p>{% endif %}
+
+  <form method="post" action="{% url 'save-analysis' study.pk %}">
+    {% csrf_token %}<input type="hidden" name="job" value="{{ selected.pk }}">
+    {% for metric in analysis_metrics.selected %}<input type="hidden" name="metric" value="{{ metric }}">{% endfor %}
+    <h3>Registrar la interpretación del investigador</h3>
+    <label>Pregunta de análisis<textarea name="question" maxlength="2000" placeholder="¿Qué querés comprobar en esta corrida?"></textarea></label>
+    <label>Lectura de la evidencia<textarea name="interpretation" maxlength="4000" placeholder="Anotá qué muestran estas métricas o estados y qué limitaciones observás."></textarea></label>
+    <label>Evaluación del investigador<select name="assessment"><option value="continue">Avanzar a la siguiente etapa</option><option value="refine">Ajustar el experimento o el modelo</option><option value="hold">No decidir todavía</option></select></label>
+    <button>Guardar análisis y evaluación</button>
+  </form>
+</section>
+
+{% if evidence_total > 100 %}<nav class="card" aria-label="Páginas de evidencia">
+  <p>Mostrando observaciones {{ evidence_page_first }}–{{ evidence_page_last }} de {{ evidence_total }} · página {{ evidence_page_number }} de {{ evidence_page_count }}.</p>
+  {% if evidence_page_number > 1 %}<a class="button" href="?{{ evidence_page_base_query }}&amp;evidence_page={{ evidence_page_number|add:'-1' }}">Anterior</a>{% endif %}
+  {% if evidence_page_number < evidence_page_count %}<a class="button" href="?{{ evidence_page_base_query }}&amp;evidence_page={{ evidence_page_number|add:'1' }}">Siguiente</a>{% endif %}
+</nav>{% endif %}

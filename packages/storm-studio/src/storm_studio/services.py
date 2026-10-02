@@ -14,6 +14,30 @@ from storm_studio.models import DatasetRevision, Job, Revision
 
 logger = logging.getLogger(__name__)
 MAX_INLINE_RESOLVED_DATA_OBSERVATIONS = 100_000
+MAX_JOB_LOG_ENTRIES = 100
+MAX_JOB_LOG_MESSAGE_CHARS = 2_000
+
+
+def append_job_logs(job_id, messages):
+    """Persist recent worker messages without letting a job's log grow unbounded."""
+    if isinstance(messages, str):
+        messages = [messages]
+    additions = []
+    timestamp = timezone.now().isoformat()
+    for message in messages:
+        message = str(message).rstrip()
+        if not message.strip():
+            continue
+        if len(message) > MAX_JOB_LOG_MESSAGE_CHARS:
+            message = message[:MAX_JOB_LOG_MESSAGE_CHARS - 1] + '…'
+        additions.append({'timestamp': timestamp, 'message': message})
+    if not additions:
+        return
+    logs = Job.objects.filter(pk=job_id).values_list('logs', flat=True).first()
+    if not isinstance(logs, list):
+        logs = []
+    Job.objects.filter(pk=job_id).update(
+        logs=(logs + additions)[-MAX_JOB_LOG_ENTRIES:])
 
 
 def catalog():
@@ -38,6 +62,20 @@ def submit(revision, previous=None, operation=None, source=None):
     if dataset_revision_id is not None:
         dataset_revision = DatasetRevision.objects.filter(pk=dataset_revision_id).first()
         if dataset_revision is not None:
+            if (dataset_revision.config.get('inference_only') is True
+                    and operation in {'train', 'update', 'resume'}):
+                raise ValueError(
+                    'This inference-only benchmark blocks training and updates.')
+            if (dataset_revision.config.get('inference_only') is True
+                    and operation == 'infer'):
+                try:
+                    descriptor = catalog().get(revision.payload.get('model', ''))
+                except KeyError as error:
+                    raise ValueError('Select a registered model before running inference.') from error
+                if {'train', 'group'} & set(descriptor.capabilities):
+                    raise ValueError(
+                        'This inference-only benchmark requires a completed model; '
+                        'apply a saved run from Modelos.')
             from storm_studio.video_timeline_reviews import require_review
 
             require_review(revision.study, dataset_revision)
@@ -114,6 +152,8 @@ def enqueue_preparation(study, recipe):
     source = DatasetRevision.objects.get(pk=recipe.payload['dataset_revision_id'])
     if source.status != 'ready' or not source.artifact_ref:
         raise ValueError('Inspect the source dataset before processing it.')
+    if source.config.get('inference_only') is True:
+        raise ValueError('This inference-only benchmark cannot be reprocessed.')
     from storm_studio.video_timeline_reviews import require_review
 
     require_review(study, source)
@@ -126,12 +166,51 @@ def enqueue_preparation(study, recipe):
 
 
 def _record_progress(job_id, update):
-    """Persist worker progress and derive an ETA when the model reports units."""
+    """Persist current progress, a bounded event trace, and an ETA when units are known."""
     now = timezone.now()
     job = Job.objects.only('progress').get(pk=job_id)
     previous = job.progress if isinstance(job.progress, dict) else {}
-    progress = {**previous, **update, 'updated_at': now.isoformat()}
+    progress = {**previous, **update, 'schema_version': 1,
+                'execution_id': str(job_id), 'updated_at': now.isoformat()}
+    if previous.get('phase') != progress.get('phase') and 'batch_step' not in update:
+        for key in ('batch_step', 'batch_total', 'throughput', 'batch_eta_seconds',
+                    'processed_observations', 'total_observations', 'loss'):
+            progress.pop(key, None)
     phase_changed = previous.get('phase') != progress.get('phase')
+    stage_changed = previous.get('stage_index') != progress.get('stage_index')
+    label_changed = previous.get('label') != progress.get('label')
+    units_changed = any(previous.get(key) != progress.get(key) for key in (
+        'phase_step', 'phase_total', 'unit_label', 'batch_step', 'epoch', 'status'))
+    trace = previous.get('trace') if isinstance(previous.get('trace'), list) else []
+    stage_trace = (previous.get('stage_trace')
+                   if isinstance(previous.get('stage_trace'), list) else [])
+    if phase_changed or stage_changed or label_changed or units_changed:
+        label = str(progress.get('label') or progress.get('phase') or 'Avance actualizado')
+        if len(label) > MAX_JOB_LOG_MESSAGE_CHARS:
+            label = label[:MAX_JOB_LOG_MESSAGE_CHARS - 1] + '…'
+        stage, stages = progress.get('stage_index'), progress.get('stage_total')
+        step, total = progress.get('phase_step'), progress.get('phase_total')
+        unit = progress.get('unit_label') or 'unidades'
+        message = f'Etapa {stage} de {stages}: {label}' if stage and stages else label
+        if step is not None and total is not None:
+            message += f' · avance {step}/{total} {unit}'
+        if len(message) > MAX_JOB_LOG_MESSAGE_CHARS:
+            message = message[:MAX_JOB_LOG_MESSAGE_CHARS - 1] + '…'
+        event = {
+            'timestamp': now.isoformat(), 'phase': progress.get('phase'),
+            'stage_index': progress.get('stage_index'),
+            'stage_total': progress.get('stage_total'),
+            'phase_step': step, 'phase_total': total, 'unit_label': progress.get('unit_label'),
+            'message': message,
+        }
+        event.update({key: progress[key] for key in ('schema_version', 'component', 'component_version', 'operation', 'status', 'span_id', 'duration_seconds', 'error_type', 'error_message', 'batch_step', 'batch_total', 'epoch', 'device', 'throughput') if key in progress})
+        if progress.get('batch_total'):
+            event['message'] += f" · lote {progress.get('batch_step', 0)}/{progress['batch_total']}"
+        trace.append(event)
+        progress['trace'] = trace[-100:]
+        if phase_changed or stage_changed:
+            stage_trace.append(event)
+            progress['stage_trace'] = stage_trace[-20:]
     if phase_changed:
         progress['phase_started_at'] = now.isoformat()
         progress['phase_started_step'] = progress.get('phase_step') or 0
@@ -221,7 +300,8 @@ def perform(job_id):
             })
             result = inspect_dataset(
                 job.revision.payload['dataset_revision'], workspace=settings.WORKSPACE,
-                artifact_root=settings.ARTIFACT_ROOT, catalog=catalog())
+                artifact_root=settings.ARTIFACT_ROOT, catalog=catalog(),
+                progress_callback=lambda update: _record_progress(job_id, update))
         elif job.operation == 'prepare':
             from storm_studio.data_preparation import materialize_preparation
 
@@ -231,7 +311,8 @@ def perform(job_id):
             })
             result = materialize_preparation(
                 job.revision_id, str(job.pk), artifact_root=settings.ARTIFACT_ROOT,
-                catalog=catalog())
+                catalog=catalog(), progress_callback=lambda update: _record_progress(
+                    job_id, {'phase': 'preparing', 'stage_index': 2, 'stage_total': 4, **update}))
         elif job.operation == 'video_preview':
             from storm_studio.video_previews import materialize_video_preview
 
@@ -259,6 +340,7 @@ def perform(job_id):
                 from storm.artifacts import FileArtifactStore
                 options['resume_from'] = FileArtifactStore(settings.ARTIFACT_ROOT).resolve(
                     kind='checkpoints', artifact_id=str(job.source_id))
+                options['resume_config'] = job.source.revision.payload.get('config', {})
             worker_catalog = catalog()
             spec = deepcopy(job.revision.payload)
             progress_callback = lambda update: _record_progress(job_id, update)
@@ -329,18 +411,34 @@ def perform(job_id):
                     spec, settings.ARTIFACT_ROOT, str(job.pk), worker_catalog,
                     progress_callback=progress_callback, **options)
         finished = timezone.now()
-        final_progress = {
+        current_progress = Job.objects.only('progress').get(pk=job_id).progress
+        stage_total = (current_progress.get('stage_total')
+                       if isinstance(current_progress, dict) else None)
+        if type(stage_total) is not int or stage_total < 1:
+            stage_total = 4 if job.operation in ('infer', 'apply') else 5
+        _record_progress(job_id, {
             'phase': 'completed', 'label': 'Ejecución completada',
-            'stage_index': 1, 'stage_total': 1, 'phase_step': 1,
-            'phase_total': 1, 'fraction': 1.0, 'eta_seconds': 0,
-            'updated_at': finished.isoformat(),
-        }
+            'stage_index': stage_total, 'stage_total': stage_total,
+            'phase_step': 1, 'phase_total': 1, 'unit_label': 'resultado',
+            'fraction': 1.0, 'eta_seconds': 0,
+        })
+        final_progress = Job.objects.only('progress').get(pk=job_id).progress
         persisted_result = _result_for_database(job_id, result)
         Job.objects.filter(pk=job_id, status='running').update(
             status='completed', result=persisted_result,
             progress=final_progress, finished=finished)
     except Exception as error:
         logger.exception('Background job %s failed', job_id)
+        try:
+            last_progress = Job.objects.only('progress').get(pk=job_id).progress or {}
+            _record_progress(job_id, {
+                'failure_context': {key: last_progress[key] for key in ('phase', 'epoch', 'batch_step', 'batch_total', 'checkpoint_epoch', 'device', 'component', 'operation') if key in last_progress},
+                'phase': 'failed',
+                'label': f'Proceso fallido: {type(error).__name__}: {error}',
+                'phase_step': None, 'phase_total': None, 'unit_label': None,
+            })
+        except Job.DoesNotExist:
+            pass
         if job.operation == 'inventory':
             dataset_revision_id = job.revision.payload.get('dataset_revision')
             dataset_revision = DatasetRevision.objects.filter(pk=dataset_revision_id).first()

@@ -100,6 +100,7 @@ class Job(models.Model):
     revision = models.ForeignKey(Revision, on_delete=models.PROTECT)
     status = models.CharField(max_length=20, default='pending')
     progress = models.JSONField(default=dict, blank=True)
+    logs = models.JSONField(default=list, blank=True)
     result = models.JSONField(default=dict)
     error = models.TextField(blank=True)
     created = models.DateTimeField(auto_now_add=True)

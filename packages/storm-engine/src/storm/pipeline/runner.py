@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from time import monotonic
 
+from storm.observability import ExecutionObserver
 from storm.pipeline.context import PipelineContext, StepExecution
 from storm.pipeline.registry import StepRegistry
 from storm.pipeline.spec import PipelineSpec
@@ -44,7 +45,7 @@ class PipelineRunner:
             name = step.registered_name()
             version = str(step.version)
             try:
-                updated = step.process(current)
+                updated = ExecutionObserver(current.progress_callback).call(step, 'process', current)
                 if not isinstance(updated, PipelineContext):
                     raise TypeError(
                         f"Pipeline step '{name}' must return PipelineContext."

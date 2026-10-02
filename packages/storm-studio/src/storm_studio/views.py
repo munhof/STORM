@@ -1,9 +1,11 @@
 import csv
+from copy import deepcopy
 import hashlib
 import io
 import json
 import mimetypes
 import math
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 import re
@@ -11,9 +13,11 @@ import statistics
 import tempfile
 import uuid
 import zipfile
+from types import SimpleNamespace
 
 from django.contrib import messages
 from django.conf import settings
+from django.core.files import File
 from django.db import transaction
 from django.db.models import Q
 from django.http import (FileResponse, HttpResponse, JsonResponse, Http404,
@@ -98,6 +102,43 @@ def _execution_eta_key(job):
     return (job.operation, job.revision_id, None)
 
 
+def _job_activity(job):
+    """Combine the structured progress trace with captured worker output."""
+    progress = job.progress if isinstance(job.progress, dict) else {}
+    trace = []
+    seen = set()
+    stage_trace = (progress.get('stage_trace')
+                   if isinstance(progress.get('stage_trace'), list) else [])
+    recent_trace = (progress.get('trace')[-100:]
+                    if isinstance(progress.get('trace'), list) else [])
+    for event in [*stage_trace, *recent_trace]:
+        if not isinstance(event, dict) or not isinstance(event.get('message'), str):
+            continue
+        identity = (event.get('timestamp'), event['message'])
+        if identity not in seen:
+            trace.append(event)
+            seen.add(identity)
+    if not trace and isinstance(progress.get('label'), str) and progress['label']:
+        stage, total = progress.get('stage_index'), progress.get('stage_total')
+        prefix = f'Etapa {stage} de {total}: ' if stage and total else ''
+        message = prefix + progress['label']
+        step, units = progress.get('phase_step'), progress.get('phase_total')
+        if step is not None and units is not None:
+            message += (f" · avance {step}/{units} "
+                        f"{progress.get('unit_label') or 'unidades'}")
+        timestamp = (progress.get('updated_at')
+                     or (job.started.isoformat() if job.started else job.created.isoformat()))
+        trace.append({'timestamp': timestamp, 'message': message})
+    trace_messages = {event['message'] for event in trace}
+    console = [event for event in (job.logs if isinstance(job.logs, list) else [])
+               if isinstance(event, dict) and isinstance(event.get('message'), str)
+               and event['message'] not in trace_messages]
+    # Keep stage changes visible even for long runs that report many epochs.
+    activity = [*trace, *console[-80:]] if trace else console[-100:]
+    activity.sort(key=lambda event: event.get('timestamp', ''))
+    return activity[-200:]
+
+
 def _decorate_execution_progress(jobs):
     """Prepare truthful step and ETA details for execution cards and polling."""
     now = timezone.now()
@@ -149,7 +190,12 @@ def _decorate_execution_progress(jobs):
                 eta_seconds = max(0, typical_duration - elapsed)
                 eta_basis = 'duración mediana de ejecuciones anteriores comparables'
 
-        job.progress_for_ui = progress
+        job.progress_for_ui = {
+            key: value for key, value in progress.items()
+            if key not in {'trace', 'stage_trace'}
+        }
+        job.batch_percent = round(100 * progress.get('batch_step', 0) / progress['batch_total']) if progress.get('batch_total') else None
+        job.activity = _job_activity(job)
         job.status_label = labels.get(job.status, job.status)
         job.stages_after_current = max(
             0, progress.get('stage_total', 0) - progress.get('stage_index', 0))
@@ -225,6 +271,680 @@ def _pose_prediction_run_options(study, dataset_revision, completed, selected_id
         })
     return options, [option['job_id'] for option in options
                      if option['job_id'] in selected_ids][:MAX_POSE_PREDICTION_RUNS]
+
+
+_REPORT_PALETTE = (
+    '#1754ad', '#7b3fb5', '#bd6400', '#16806a', '#a32929', '#3d6b2f',
+    '#0081a7', '#d1495b', '#6d597a', '#7f5539', '#386641', '#5e60ce',
+)
+_POSE_PALETTE = ('#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#c77dff', '#f9844a')
+
+
+def _finite_report_number(value):
+    return type(value) is int or (type(value) is float and math.isfinite(value))
+
+
+def _prediction_label(value, metadata, capabilities=()):
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    mapping = metadata.get('category_mapping') if isinstance(metadata, dict) else None
+    if isinstance(mapping, dict) and str(value) in mapping:
+        mapped_label = str(mapping[str(value)])
+        if (metadata.get('task') in {'classification', 'binary_classification'}
+                and mapped_label.strip().lower() in {
+                    'unknown', 'unmapped', 'desconocido', 'sin correspondencia'}):
+            return f'Clase {value} (sin correspondencia)'
+        return mapped_label
+    semantics = metadata.get('semantics', '') if isinstance(metadata, dict) else ''
+    label = str(value)
+    is_state = 'group' in capabilities or 'state' in str(semantics).lower()
+    return f'Estado {label}' if is_state else label
+
+
+def _report_visuals(result):
+    """Build small, dependency-free SVG chart data for one execution result."""
+    from collections import Counter
+
+    indices = result.get('indices') or []
+    predictions = result.get('predictions') or []
+    mask = result.get('prediction_mask')
+    if (not isinstance(mask, list) or len(mask) != len(predictions)
+            or any(type(value) is not bool for value in mask)):
+        mask = [True] * len(predictions)
+    metadata = result.get('output_metadata') or {}
+    capabilities = result.get('capabilities') or []
+    numeric_output = metadata.get('task') == 'regression'
+    if numeric_output:
+        low_value = min((value for value, valid in zip(predictions, mask)
+                         if valid and _finite_report_number(value)), default=None)
+        high_value = max((value for value, valid in zip(predictions, mask)
+                          if valid and _finite_report_number(value)), default=None)
+        bin_count = 20 if low_value is not None and low_value < high_value else 1
+        counts = Counter()
+        if low_value is not None:
+            for value, valid in zip(predictions, mask):
+                if not valid or not _finite_report_number(value):
+                    continue
+                bucket = (0 if high_value == low_value else min(
+                    bin_count - 1,
+                    int((value - low_value) * bin_count / (high_value - low_value))))
+                interval_low = low_value + (high_value - low_value) * bucket / bin_count
+                interval_high = low_value + (high_value - low_value) * (bucket + 1) / bin_count
+                counts[f'{interval_low:.3g}–{interval_high:.3g}'] += 1
+    else:
+        counts = Counter(_prediction_label(value, metadata, capabilities)
+                         for value, valid in zip(predictions, mask) if valid)
+        if len(counts) > 30:
+            top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:29]
+            other_count = sum(count for _, count in counts.items()) - sum(
+                count for _, count in top)
+            counts = Counter(top)
+            counts['Otras categorías'] = other_count
+    maximum_count = max(counts.values(), default=0)
+    prediction_rows = [
+        {'label': label, 'count': count,
+         'y': 28 + index * 30,
+         'color': _REPORT_PALETTE[index % len(_REPORT_PALETTE)],
+         'bar_width': round(360 * count / maximum_count) if maximum_count else 0}
+        for index, (label, count) in enumerate(sorted(counts.items()))
+    ]
+    metric_values = []
+    for name, value in (result.get('metrics') or {}).items():
+        if isinstance(name, str) and _finite_report_number(value):
+            metric_values.append((name, value))
+    maximum_metric = max((abs(value) for _, value in metric_values), default=0)
+    definitions = {item.get('name'): item for item in result.get('metric_definitions', [])
+                   if isinstance(item, dict)}
+    metric_rows = [
+        {'name': name, 'value': value,
+         'y': 28 + index * 30,
+         'direction': definitions.get(name, {}).get('direction', 'no declarada'),
+         'bar_width': round(360 * abs(value) / maximum_metric) if maximum_metric else 0,
+         'color': _REPORT_PALETTE[index % len(_REPORT_PALETTE)]}
+        for index, (name, value) in enumerate(sorted(metric_values))
+    ]
+    semantics = metadata.get('semantics', '')
+    distribution_title = ('Distribución de salida numérica' if numeric_output else
+                          'Distribución de estados'
+                          if 'group' in capabilities or 'state' in str(semantics).lower()
+                          else 'Distribución de predicciones')
+    state_diagnostics = _state_diagnostics(result)
+    resolved_data = result.get('resolved_data') or {}
+    observation_count = len(resolved_data.get('inputs') or [])
+    output_count = min(len(indices), len(predictions), len(mask))
+    labeled = resolved_data.get('targets') or []
+    evaluation_mask = resolved_data.get('evaluation_mask')
+    if not isinstance(evaluation_mask, list) or len(evaluation_mask) != len(labeled):
+        evaluation_mask = [value is not None for value in labeled]
+    label_count = sum(
+        valid and type(index) is int and 0 <= index < len(labeled)
+        and labeled[index] is not None and evaluation_mask[index] is True
+        for index, valid in zip(indices[:output_count], mask[:output_count]))
+    valid_prediction_count = sum(mask[:output_count])
+    excluded_count = output_count - valid_prediction_count
+    in_scope_indices = {
+        index for index in indices[:output_count]
+        if type(index) is int and 0 <= index < observation_count
+    }
+    outside_run_count = (max(0, observation_count - len(in_scope_indices))
+                         if resolved_data.get('inputs') is not None else None)
+    output_metadata = result.get('output_metadata') or {}
+    category_mapping = output_metadata.get('category_mapping')
+    task = output_metadata.get('task')
+    unresolved_labels = {'unknown', 'unmapped', 'desconocido', 'sin correspondencia'}
+    taxonomy_alignment_warning = (
+        task in {'classification', 'binary_classification'}
+        and (not isinstance(category_mapping, dict) or not category_mapping
+             or any(str(label).strip().lower() in unresolved_labels
+                    for label in category_mapping.values()))
+    )
+    return {'predictions': prediction_rows, 'metrics': metric_rows,
+            'prediction_count': sum(counts.values()),
+            'observation_count': observation_count,
+            'prediction_scope_count': output_count,
+            'valid_prediction_count': valid_prediction_count,
+            'excluded_prediction_count': excluded_count,
+            'outside_run_count': outside_run_count,
+            'labeled_observation_count': label_count,
+            'prediction_coverage': round(100 * valid_prediction_count / output_count, 1)
+            if output_count else None,
+            'taxonomy_alignment_warning': taxonomy_alignment_warning,
+            **state_diagnostics,
+            'prediction_height': max(90, 42 + len(prediction_rows) * 30),
+            'metric_height': max(90, 42 + len(metric_rows) * 30),
+            'distribution_title': distribution_title}
+
+
+def _state_diagnostics(result):
+    """Summarize adjacent state runs without joining sessions or video segments."""
+    from collections import Counter
+
+    capabilities = result.get('capabilities') or []
+    output_metadata = result.get('output_metadata') or {}
+    if ('group' not in capabilities
+            and 'state' not in str(output_metadata.get('semantics', '')).lower()):
+        return {'state_transitions': [], 'state_durations': [],
+                'state_duration_histogram': {'bins': [], 'states': [], 'height': 240},
+                'state_transition_matrix': {'labels': [], 'rows': []}, 'state_bouts': []}
+    data = result.get('resolved_data') or {}
+    inputs = data.get('inputs') or []
+    indices = result.get('indices') or []
+    predictions = result.get('predictions') or []
+    mask = result.get('prediction_mask')
+    if (not isinstance(mask, list) or len(mask) != len(predictions)
+            or len(indices) != len(predictions)):
+        mask = [True] * len(predictions)
+    if not isinstance(data.get('sessions'), list) or not isinstance(data.get('frames'), list):
+        return {'state_transitions': [], 'state_durations': [],
+                'state_duration_histogram': {'bins': [], 'states': [], 'height': 240},
+                'state_transition_matrix': {'labels': [], 'rows': []}, 'state_bouts': []}
+    sessions, frames = data['sessions'], data['frames']
+    segments = data.get('segments') or sessions
+    if any(len(values) != len(inputs) for values in (sessions, frames, segments)):
+        return {'state_transitions': [], 'state_durations': [],
+                'state_duration_histogram': {'bins': [], 'states': [], 'height': 240},
+                'state_transition_matrix': {'labels': [], 'rows': []}, 'state_bouts': []}
+
+    if any(current < previous for previous, current in zip(indices, indices[1:])):
+        return {'state_transitions': [], 'state_durations': [],
+                'state_duration_histogram': {'bins': [], 'states': [], 'height': 240},
+                'state_transition_matrix': {'labels': [], 'rows': []}, 'state_bouts': []}
+    transitions = Counter()
+    bouts = Counter()
+    frame_totals = Counter()
+    minimum_durations = {}
+    maximum_durations = {}
+    duration_bin_counts = {}
+    bout_rows = []
+    total_bout_count = 0
+    current = []
+
+    def finish_bout():
+        nonlocal total_bout_count
+        if current:
+            label = current[0][3]
+            duration = len(current)
+            bouts[label] += 1
+            frame_totals[label] += duration
+            minimum_durations[label] = min(minimum_durations.get(label, duration), duration)
+            maximum_durations[label] = max(maximum_durations.get(label, duration), duration)
+            duration_bin_counts.setdefault(label, Counter())[duration.bit_length() - 1] += 1
+            total_bout_count += 1
+            if len(bout_rows) < 1000:
+                bout_rows.append({
+                    'episode': total_bout_count, 'label': label,
+                    'session': current[0][0], 'segment': current[0][1],
+                    'start_frame': current[0][2], 'end_frame': current[-1][2],
+                    'frames': duration,
+                })
+            current.clear()
+
+    previous = None
+    for index, prediction, valid in zip(indices, predictions, mask):
+        if type(index) is not int or not 0 <= index < len(inputs):
+            finish_bout()
+            previous = None
+            continue
+        frame = frames[index]
+        if type(frame) is not int:
+            finish_bout()
+            previous = None
+            continue
+        row = (str(sessions[index]), str(segments[index]), frame,
+               _prediction_label(prediction, output_metadata, capabilities),
+               bool(valid))
+        adjacent = (previous is not None and previous[0] == row[0]
+                    and previous[1] == row[1] and row[2] == previous[2] + 1
+                    and previous[4] and row[4])
+        if not row[4]:
+            finish_bout()
+            previous = row
+            continue
+        if not adjacent:
+            finish_bout()
+            current.append(row)
+        else:
+            if previous[3] != row[3]:
+                transitions[(previous[3], row[3])] += 1
+                finish_bout()
+            current.append(row)
+        previous = row
+    finish_bout()
+    labels = sorted(set(bouts) | {state for pair in transitions for state in pair})
+    colors = {label: _REPORT_PALETTE[index % len(_REPORT_PALETTE)]
+              for index, label in enumerate(labels)}
+    for bout in bout_rows:
+        bout['color'] = colors[bout['label']]
+    transition_rows = [
+        {'from': first, 'to': second, 'count': count}
+        for (first, second), count in sorted(transitions.items())]
+    total_frames = sum(frame_totals.values())
+    duration_rows = []
+    for label in labels:
+        if not bouts[label]:
+            continue
+        duration_rows.append({
+            'label': label, 'bouts': bouts[label],
+            'mean_frames': round(frame_totals[label] / bouts[label], 3),
+            'min_frames': minimum_durations[label],
+            'max_frames': maximum_durations[label], 'total_frames': frame_totals[label],
+            'share_percent': round(100 * frame_totals[label] / total_frames, 1)
+            if total_frames else 0,
+            'color': colors[label],
+        })
+
+    maximum_duration = max(maximum_durations.values(), default=0)
+    duration_ranges = []
+    if maximum_duration:
+        duration_ranges.append((1, 1))
+        lower, upper = 2, 3
+        while lower <= maximum_duration:
+            duration_ranges.append((lower, upper))
+            lower, upper = upper + 1, upper * 2 + 1
+    histogram_max = max((duration_bin_counts.get(label, {}).get(low.bit_length() - 1, 0)
+                         for low, _ in duration_ranges for label in labels), default=0)
+    histogram_bins = []
+    plot_top, plot_height, plot_left, plot_width = 28, 150, 58, 715
+    bin_width = plot_width / max(1, len(duration_ranges))
+    state_slot = bin_width / max(1, len(labels))
+    bar_width = max(3, min(30, state_slot * 0.68))
+    for bin_index, (low, high) in enumerate(duration_ranges):
+        bin_label = str(low) if low == high else f'{low}–{high}'
+        bars = []
+        for state_index, label in enumerate(labels):
+            count = duration_bin_counts.get(label, {}).get(low.bit_length() - 1, 0)
+            height = round(plot_height * count / histogram_max) if histogram_max else 0
+            x = plot_left + bin_index * bin_width + state_index * state_slot
+            bars.append({
+                'label': label, 'count': count, 'color': colors[label],
+                'x': round(x + (state_slot - bar_width) / 2, 1),
+                'y': plot_top + plot_height - height,
+                'width': round(bar_width, 1), 'height': height,
+            })
+        histogram_bins.append({
+            'label': bin_label, 'x': round(plot_left + (bin_index + 0.5) * bin_width, 1),
+            'bars': bars,
+        })
+    histogram = {
+        'bins': histogram_bins,
+        'states': [{'label': label, 'color': colors[label]} for label in labels],
+        'height': 240, 'max_count': histogram_max,
+        'plot_top': plot_top, 'plot_height': plot_height,
+        'plot_bottom': plot_top + plot_height, 'plot_left': plot_left,
+        'plot_right': plot_left + plot_width,
+    }
+
+    max_transition_count = max(transitions.values(), default=0)
+    matrix_rows = []
+    for source in labels:
+        rgb = tuple(int(colors[source][position:position + 2], 16)
+                    for position in (1, 3, 5))
+        cells = []
+        for target in labels:
+            count = transitions.get((source, target), 0)
+            alpha = 0.06 if not count else 0.18 + 0.82 * count / max_transition_count
+            cells.append({
+                'target': target, 'count': count,
+                'background': f'rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {alpha:.3f})',
+                'text_color': '#fff' if alpha >= 0.58 else '#163047',
+            })
+        matrix_rows.append({'label': source, 'color': colors[source], 'cells': cells})
+    return {
+        'state_transitions': transition_rows, 'state_durations': duration_rows,
+        'state_duration_histogram': histogram,
+        'state_transition_matrix': {'labels': labels, 'rows': matrix_rows},
+        'state_bouts': bout_rows, 'state_bout_count': total_bout_count,
+        'state_bouts_truncated': total_bout_count > len(bout_rows),
+    }
+
+
+def _posthoc_metric_analysis(result, metric_names, catalog):
+    """Recalculate registered metrics from valid labels and predictions only."""
+    from storm.models import ModelOutput
+    from storm.runs import Dataset
+
+    data = result.get('resolved_data') or {}
+    inputs = data.get('inputs')
+    targets = data.get('targets')
+    indices = result.get('indices')
+    predictions = result.get('predictions')
+    mask = result.get('prediction_mask')
+    evaluation_mask = data.get('evaluation_mask')
+    if (not isinstance(inputs, list) or not isinstance(indices, list)
+            or not isinstance(predictions, list) or len(indices) != len(predictions)):
+        return {'choices': [], 'rows': [], 'sample_count': 0,
+                'reason': 'La corrida no conserva una alineación válida entre datos y salidas.',
+                'errors': [], 'selected': []}
+    if not isinstance(targets, list):
+        targets = [None] * len(inputs)
+    if evaluation_mask is None:
+        evaluation_mask = [target is not None for target in targets]
+    if (len(targets) != len(inputs) or not isinstance(evaluation_mask, list)
+            or len(evaluation_mask) != len(inputs)
+            or any(type(value) is not bool for value in evaluation_mask)):
+        return {'choices': [], 'rows': [], 'sample_count': 0,
+                'reason': 'Las etiquetas o su máscara no se alinean con los datos de la corrida.',
+                'errors': [], 'selected': []}
+    if mask is None:
+        mask = [True] * len(predictions)
+    elif (not isinstance(mask, list) or len(mask) != len(predictions)
+          or any(type(value) is not bool for value in mask)):
+        return {'choices': [], 'rows': [], 'sample_count': 0,
+                'reason': 'La máscara de predicción no se alinea con las salidas guardadas.',
+                'errors': [], 'selected': []}
+    metadata = result.get('output_metadata') or {}
+    raw_task = metadata.get('task')
+    task = raw_task
+    mapping_reason = ''
+    binary_taxonomy = None
+    if raw_task == 'binary_classification':
+        taxonomy = data.get('taxonomy')
+        mapping = metadata.get('category_mapping')
+        mapping_version = metadata.get('category_mapping_version')
+        if (not isinstance(taxonomy, list) or len(taxonomy) != 2
+                or any(not isinstance(category, str) or not category for category in taxonomy)
+                or len(set(taxonomy)) != 2 or mapping != {'0': taxonomy[0], '1': taxonomy[1]}
+                or not isinstance(mapping_version, str) or not mapping_version.strip()):
+            mapping_reason = (
+                'La salida binaria no tiene una correspondencia versionada con la taxonomía; '
+                'no se calculan métricas para evitar mezclar tareas distintas.')
+            task = None
+        else:
+            binary_taxonomy = taxonomy
+            task = 'classification'
+    elif task is None and 'group' in (result.get('capabilities') or []):
+        task = 'clustering'
+    if task not in {'classification', 'clustering', 'regression'}:
+        task = None
+
+    compatible = []
+    for name in catalog.metrics.available:
+        metric = catalog.metrics.get(name)
+        metric_task = getattr(metric, 'compatible_task', None)
+        if task and metric_task in (None, task):
+            compatible.append(name)
+    requested = list(dict.fromkeys(name for name in metric_names if name in compatible))
+    positions = []
+    paired_predictions = []
+    paired_targets = []
+    for position, (index, prediction, valid) in enumerate(zip(indices, predictions, mask)):
+        if (type(index) is int and 0 <= index < len(targets) and valid
+                and evaluation_mask[index] is True and targets[index] is not None):
+            target = targets[index]
+            if binary_taxonomy is not None:
+                if isinstance(target, str) and target in binary_taxonomy:
+                    target = binary_taxonomy.index(target)
+                elif type(target) is int and target in (0, 1):
+                    pass
+                else:
+                    continue
+                if type(prediction) not in (int, float) or prediction not in (0, 1):
+                    continue
+            positions.append(index)
+            paired_predictions.append(prediction)
+            paired_targets.append(target)
+    rows = []
+    errors = []
+    if positions and requested:
+        output = ModelOutput(paired_predictions, metadata=metadata)
+        dataset = Dataset([inputs[index] for index in positions], paired_targets)
+        for name in requested:
+            try:
+                value = float(catalog.metrics.get(name).evaluate(
+                    dataset=dataset, output=output, model=None))
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError) as error:
+                errors.append(f'{name}: {error}')
+                continue
+            rows.append({'name': name, 'value': value,
+                         'direction': catalog.metrics.describe(name)['direction']})
+    reason = ''
+    if mapping_reason:
+        reason = mapping_reason
+    elif not positions:
+        reason = 'No hay observaciones con etiqueta válida y predicción utilizable.'
+    elif task is None:
+        reason = 'El adapter no declaró la tarea de salida; definila antes de calcular métricas.'
+    elif not compatible:
+        reason = 'No hay métricas registradas compatibles con la tarea de esta salida.'
+    elif not requested:
+        reason = 'Elegí una o más métricas registradas para calcular sobre esta muestra.'
+    elif errors and not rows:
+        reason = 'No se pudieron calcular las métricas seleccionadas: ' + '; '.join(errors)
+    return {
+        'choices': compatible, 'rows': rows, 'sample_count': len(positions),
+        'reason': reason, 'errors': errors,
+        'selected': requested,
+    }
+
+
+def _comparison_metric_visuals(jobs):
+    if len(jobs) < 2:
+        return []
+    metric_names = set.union(*(
+        {name for name, value in (job.result.get('metrics') or {}).items()
+         if _finite_report_number(value)}
+        for job in jobs))
+    charts = []
+    for name in sorted(metric_names):
+        metric_jobs = [job for job in jobs
+                       if _finite_report_number(
+                           (job.result.get('metrics') or {}).get(name))]
+        if len(metric_jobs) < 2:
+            continue
+        signatures = []
+        for job in metric_jobs:
+            definition = next((item for item in (job.result.get('metric_definitions') or [])
+                              if isinstance(item, dict) and item.get('name') == name), None)
+            if definition is None:
+                signatures = []
+                break
+            signatures.append((definition.get('version'), definition.get('direction')))
+        if len(signatures) != len(metric_jobs) or len(set(signatures)) != 1:
+            continue
+        values = [job.result['metrics'][name] for job in metric_jobs]
+        low, high = min(values), max(values)
+        definitions = {item.get('name'): item for item in
+                       (metric_jobs[0].result.get('metric_definitions') or [])
+                       if isinstance(item, dict)}
+        points = []
+        for index, (job, value) in enumerate(zip(metric_jobs, values)):
+            x = 400 if high == low else 70 + (value - low) * 660 / (high - low)
+            points.append({'x': round(x, 2), 'y': 24 + index * 30,
+                           'value': value, 'model': job.result.get('model'),
+                           'job': str(job.pk),
+                           'color': _REPORT_PALETTE[index % len(_REPORT_PALETTE)]})
+        charts.append({'name': name,
+                       'direction': definitions.get(name, {}).get('direction', 'no declarada'),
+                       'low': low, 'high': high,
+                       'run_count': len(metric_jobs),
+                       'height': max(100, 40 + len(points) * 30), 'points': points})
+    return charts
+
+
+def _report_video_context(study, dataset_revision, dataset_assets, asset_sessions,
+                          job, result, requested_session=''):
+    """Return a video player only when the run aligns to the active source session."""
+    if not dataset_revision or not job:
+        return None
+    data = result.get('resolved_data') or {}
+    inputs = data.get('inputs')
+    sessions, frames = data.get('sessions'), data.get('frames')
+    indices, predictions = result.get('indices'), result.get('predictions')
+    mask = result.get('prediction_mask')
+    if (not isinstance(inputs, list) or not isinstance(sessions, list)
+            or not isinstance(frames, list) or len(sessions) != len(inputs)
+            or len(frames) != len(inputs) or not isinstance(indices, list)
+            or not isinstance(predictions, list) or len(indices) != len(predictions)):
+        return None
+    if mask is None:
+        mask = [True] * len(indices)
+    if (not isinstance(mask, list) or len(mask) != len(indices)
+            or any(type(value) is not bool for value in mask)):
+        return None
+    spec = result.get('spec') or {}
+    try:
+        source_run = DatasetRevision.objects.get(pk=spec['dataset_revision_id'], status='ready')
+        active_root = services._root_dataset_revision(dataset_revision)
+        run_root = services._root_dataset_revision(source_run)
+    except (KeyError, TypeError, ValueError, DatasetRevision.DoesNotExist):
+        return None
+    if active_root.pk != run_root.pk:
+        return None
+    video_frames = data.get('video_frames')
+    has_video_frames = isinstance(video_frames, list) and len(video_frames) == len(inputs)
+    segments = data.get('segments')
+    if not isinstance(segments, list) or len(segments) != len(inputs):
+        segments = sessions
+    videos_by_session = {}
+    for asset in dataset_assets:
+        if asset.role != 'video':
+            continue
+        session_id = asset_sessions.get(str(asset.pk)) or asset.session_id
+        if session_id:
+            videos_by_session.setdefault(str(session_id), asset)
+    predicted_sessions = {
+        str(sessions[index]) for index, valid in zip(indices, mask)
+        if type(index) is int and 0 <= index < len(sessions) and valid is True
+    }
+    available_sessions = list(dict.fromkeys(
+        str(value) for value in sessions
+        if str(value) in videos_by_session and str(value) in predicted_sessions))
+    selected_session = (requested_session if requested_session in available_sessions
+                        else next(iter(available_sessions), None))
+    if selected_session is None:
+        return None
+    asset = videos_by_session[selected_session]
+    video_preview_job = None
+    from storm_studio.video_previews import latest_video_preview_job, preview_path
+    video_preview_job = latest_video_preview_job(
+        study.pk, dataset_revision.pk, asset.pk)
+    preview_available = bool(preview_path(video_preview_job, settings.WORKSPACE))
+    configured_offsets = dataset_revision.config.get('video_frame_offsets') or {}
+    if not isinstance(configured_offsets, dict):
+        configured_offsets = {}
+    frame_offset = _integer_or_default(configured_offsets.get(str(asset.pk), 0), default=0)
+    if not has_video_frames:
+        pose_frame_base = _integer_or_default(
+            dataset_revision.config.get('pose_frame_base', 0), default=0)
+        video_frames = [
+            frame - pose_frame_base + frame_offset
+            if isinstance(frame, (int, float)) and not isinstance(frame, bool)
+            and math.isfinite(frame) else None
+            for frame in frames
+        ]
+
+    categories = set()
+    observations = []
+    for index, prediction, valid in zip(indices, predictions, mask):
+        if (type(index) is not int or not 0 <= index < len(inputs)
+                or type(valid) is not bool or not valid
+                or str(sessions[index]) != selected_session):
+            observations.append(None)
+            continue
+        frame = video_frames[index]
+        if isinstance(frame, bool) or not isinstance(frame, (int, float)) or not math.isfinite(frame):
+            observations.append(None)
+            continue
+        frame = int(frame)
+        label = _prediction_label(
+            prediction, result.get('output_metadata') or result.get('semantics') or {},
+            result.get('capabilities') or [])
+        categories.add(label)
+        observations.append({'frame': frame, 'label': label,
+                             'segment': str(segments[index])})
+    label_colors = {label: _REPORT_PALETTE[index % len(_REPORT_PALETTE)]
+                    for index, label in enumerate(sorted(categories))}
+    bouts = []
+    current = None
+    for observation in observations:
+        if observation is None:
+            if current:
+                bouts.append(current)
+                current = None
+            continue
+        if (current and current['label'] == observation['label']
+                and current['segment'] == observation['segment']
+                and observation['frame'] == current['stop']):
+            current['stop'] += 1
+            continue
+        if current:
+            bouts.append(current)
+        current = {'start': observation['frame'], 'stop': observation['frame'] + 1,
+                   'label': observation['label'], 'segment': observation['segment'],
+                   'color': label_colors[observation['label']]}
+    if current:
+        bouts.append(current)
+    if not bouts:
+        return None
+    start = min(item['start'] for item in bouts)
+    stop = max(item['stop'] for item in bouts)
+    span = max(1, stop - start)
+    for item in bouts:
+        item['left'] = round(100 * (item['start'] - start) / span, 4)
+        item['width'] = max(0.15, round(100 * (item['stop'] - item['start']) / span, 4))
+    pose_ref = active_root.inventory.get('pose_preview_store')
+    pose_sessions = {str(item.get('session_id')) for item in pose_ref.get('sessions', [])
+                     if isinstance(item, dict)} if isinstance(pose_ref, dict) else set()
+    pose_available = selected_session in pose_sessions
+    pose_feature_names = (pose_ref.get('feature_names', [])
+                          if pose_available else [])
+    pose_parts = []
+    for name in pose_feature_names:
+        if (isinstance(name, str) and name.endswith('_x')
+                and f'{name[:-2]}_y' in pose_feature_names):
+            pose_parts.append({
+                'name': name[:-2],
+                'color': _POSE_PALETTE[len(pose_parts) % len(_POSE_PALETTE)],
+            })
+    return {
+        'session_id': selected_session,
+        'job_id': str(job.pk),
+        'available_sessions': [
+            {'session_id': session_id, 'name': videos_by_session[session_id].original_name}
+            for session_id in available_sessions
+        ],
+        'model': result.get('model', 'Modelo'),
+        'video_url': reverse('video-preview', args=(study.pk, asset.pk)),
+        'prepare_url': reverse('prepare-video-preview', args=(study.pk, asset.pk)),
+        'content_type': mimetypes.guess_type(asset.original_name)[0] or '',
+        'preview_available': preview_available,
+        'preview_status': video_preview_job.status if video_preview_job else '',
+        'fps': dataset_revision.config.get('fps', 30),
+        'frame_offset': frame_offset,
+        'start_frame': start, 'stop_frame': stop,
+        'segments': bouts,
+        'legend': [{'label': label, 'color': label_colors[label]}
+                   for label in sorted(categories)],
+        'pose_available': pose_available,
+        'pose_endpoint': (reverse('pose-preview', args=(study.pk, active_root.pk))
+                          if pose_available else ''),
+        'pose_feature_names': pose_feature_names,
+        'pose_parts': pose_parts,
+    }
+
+
+def _html_report_manifest(result, *, visuals=None):
+    """Keep the readable HTML report compact; full arrays remain in JSON export."""
+    keys = (
+        'schema_version', 'execution_id', 'model', 'partition', 'metrics',
+        'metric_definitions', 'metric_reason', 'evaluation_status', 'capabilities',
+        'output_metadata', 'data_fingerprint', 'spec', 'lineage', 'model_ref',
+        'output_ref', 'result_artifact_ref',
+    )
+    manifest = {key: result[key] for key in keys if key in result}
+    data = result.get('resolved_data') or {}
+    inputs = data.get('inputs') or []
+    targets = data.get('targets') or []
+    manifest['resolved_data_summary'] = {
+        'observation_count': len(inputs),
+        'labeled_observation_count': sum(value is not None for value in targets),
+        'session_count': len({str(value) for value in data.get('sessions') or []}),
+        'taxonomy': data.get('taxonomy') or [],
+        'feature_names': data.get('feature_names') or [],
+        'inference_only': data.get('inference_only') is True,
+    }
+    manifest['prediction_summary'] = visuals or _report_visuals(result)
+    return manifest
 
 
 # The public workflow is task-oriented; the existing section routes remain the
@@ -601,6 +1321,12 @@ def page(request, study_id, section):
                         payload['dataset_revision_id'] = selected_dataset.pk
                         payload['connector'] = selected_dataset.connector
                         payload['data'] = {}
+                        if (selected_dataset.config.get('inference_only') is True
+                                and payload.get('operation') != 'infer'):
+                            form.add_error(
+                                'operation',
+                                'Este benchmark es solo para inferencia. Para entrenar, elegí '
+                                'otro dataset; para evaluar un modelo guardado, usá Modelos.')
                     correction_revision_id = payload.get('label_correction_revision_id')
                     if correction_revision_id:
                         if selected_dataset is None:
@@ -628,6 +1354,8 @@ def page(request, study_id, section):
         and (job.revision_id == latest.pk or job.revision.parent_id == latest.pk)
         for job in jobs))
     dataset_revision = study.dataset_revision if study.dataset_revision_id else None
+    dataset_inference_only = bool(
+        dataset_revision and dataset_revision.config.get('inference_only') is True)
     if dataset_revision and dataset_revision.status in ('queued', 'inspecting'):
         active_inventory = any(
             job.operation == 'inventory' and job.status in ('pending', 'running')
@@ -652,6 +1380,14 @@ def page(request, study_id, section):
             try:
                 store.resolve(kind='checkpoints', artifact_id=str(job.pk))
                 resumable.append(job.pk)
+                component = services.catalog().get(job.revision.payload.get('model', ''))
+                device_schema = component.schema.get('properties', {}).get('device', {})
+                choices = device_schema.get('enum')
+                if isinstance(choices, list) and choices:
+                    job.resume_device_options = choices
+                    job.resume_device_default = (
+                        'auto' if 'auto' in choices else
+                        job.revision.payload.get('config', {}).get('device', choices[0]))
             except (FileNotFoundError, KeyError):
                 pass
     selected_id = request.GET.get('job')
@@ -689,48 +1425,95 @@ def page(request, study_id, section):
                                      [True] * len(first.result['indices'])))
                 if valid and index in other
             ]
-    comparison_metrics = []
-    if compared_jobs:
-        metric_names = set.intersection(*(set(job.result.get('metrics', {})) for job in compared_jobs))
-        palette = ('#1754ad', '#7b3fb5', '#bd6400', '#16806a', '#a32929')
-        for metric_name in sorted(metric_names):
-            values = [job.result['metrics'][metric_name] for job in compared_jobs]
-            if not all(type(value) in (int, float) for value in values):
-                continue
-            low, high = min(values), max(values)
-            definitions = {item.get('name'): item for item in compared_jobs[0].result.get('metric_definitions', [])}
-            points = []
-            for index, (job, value) in enumerate(zip(compared_jobs, values)):
-                x = 400 if high == low else 70 + (value - low) * 660 / (high - low)
-                points.append({'x': round(x, 2), 'y': 20 + index * 28,
-                               'value': value, 'model': job.result.get('model'),
-                               'job': str(job.pk), 'color': palette[index % len(palette)]})
-            comparison_metrics.append({'name': metric_name,
-                                       'direction': definitions.get(metric_name, {}).get('direction', 'no declarada'),
-                                       'low': low, 'high': high, 'height': max(100, 32 + len(points) * 28),
-                                       'points': points})
+    comparison_metrics = _comparison_metric_visuals(compared_jobs)
     evidence = []
     annotation = None
     output_metadata = {}
+    inference_only_benchmark = False
+    analysis_metrics = {'choices': [], 'rows': [], 'sample_count': 0,
+                        'reason': '', 'errors': [], 'selected': []}
+    evidence_page_number = 1
+    evidence_page_count = 1
+    evidence_total = 0
+    evidence_page_first = 0
+    evidence_page_last = 0
+    evidence_page_base_query = ''
+    evidence_visuals = None
+    evidence_feature_options = []
+    evidence_plot_data = []
+    multivariate_evidence = False
     if selected and section == 'evidence':
         selected_result = services.load_execution_result(selected)
         data = selected_result['resolved_data']
         output_metadata = selected_result.get('output_metadata', {})
+        inference_only_benchmark = data.get('inference_only') is True
+        evidence_visuals = _report_visuals(selected_result)
         annotation = study.revision_set.filter(kind='annotations', payload__job=str(selected.pk)).order_by('-pk').first()
+        analysis_metrics = _posthoc_metric_analysis(
+            selected_result, request.GET.getlist('metric'), ui_catalog)
+        evidence_page_base_query = urlencode(
+            [('job', str(selected.pk))]
+            + [('metric', name) for name in analysis_metrics['selected']])
         prediction_mask = selected_result.get(
             'prediction_mask', [True] * len(selected_result['indices']))
-        for index, prediction, prediction_valid in zip(
-                selected_result['indices'], selected_result['predictions'], prediction_mask):
+        indices = selected_result.get('indices') or []
+        predictions = selected_result.get('predictions') or []
+        evidence_total = min(len(indices), len(predictions), len(prediction_mask))
+        page_size = 100
+        evidence_page_count = max(1, math.ceil(evidence_total / page_size))
+        evidence_page_number = min(evidence_page_count, max(
+            1, _integer_or_default(request.GET.get('evidence_page'), default=1)))
+        start = (evidence_page_number - 1) * page_size
+        stop = min(evidence_total, start + page_size)
+        evidence_page_first = start + 1 if evidence_total else 0
+        evidence_page_last = stop
+        for output_position in range(start, stop):
+            index = indices[output_position]
+            prediction = predictions[output_position]
+            prediction_valid = prediction_mask[output_position]
             confidence = output_metadata.get('confidence', [])
-            output_position = len(evidence)
-            evidence.append({'index': index, 'raw': data['inputs'][index], 'prediction': prediction,
+            raw_input = data['inputs'][index]
+            raw_features = []
+            raw_summary = raw_input
+            if isinstance(raw_input, (list, tuple)):
+                feature_values = raw_input
+                window_frames = None
+                if feature_values and all(isinstance(frame, (list, tuple))
+                                          for frame in feature_values):
+                    window_frames = len(feature_values)
+                    feature_values = feature_values[len(feature_values) // 2]
+                if feature_values and all(_finite_report_number(value)
+                                          for value in feature_values):
+                    names = data.get('feature_names') or []
+                    raw_features = [
+                        {'name': str(names[position]) if position < len(names)
+                         else f'Característica {position + 1}', 'value': value}
+                        for position, value in enumerate(feature_values)
+                    ]
+                    raw_summary = (f'Ventana de {window_frames} frames · frame central · '
+                                   f'{len(raw_features)} características'
+                                   if window_frames is not None else
+                                   f'{len(raw_features)} características')
+                else:
+                    raw_summary = f'Entrada vectorial · {len(raw_input)} valores'
+            evidence.append({'index': index, 'raw': raw_input, 'raw_summary': raw_summary,
+                             'raw_features': raw_features, 'prediction': prediction,
                              'prediction_valid': prediction_valid,
                              'target': (data.get('targets') or [None] * len(data['inputs']))[index],
                              'confidence': confidence[output_position] if output_position < len(confidence)
                              and output_metadata.get('confidence_semantics') else None})
     output_semantics = output_metadata.get('semantics')
     group_output = isinstance(output_semantics, str) and 'group' in output_semantics.lower()
-    numeric_evidence = bool(evidence) and not group_output and all(
+    multivariate_evidence = bool(evidence) and any(
+        isinstance(row['raw'], (list, tuple)) for row in evidence)
+    if multivariate_evidence:
+        evidence_feature_options = evidence[0]['raw_features']
+    evidence_plot_data = [
+        {**row, 'raw': row['raw_summary'] if isinstance(row['raw'], (list, tuple))
+         else row['raw']}
+        for row in evidence
+    ]
+    numeric_evidence = bool(evidence) and not multivariate_evidence and not group_output and all(
         type(value) in (int, float) and (not isinstance(value, float) or value == value and abs(value) != float('inf'))
         for row in evidence for value in (row['raw'], row['prediction'], row['target']) if value is not None
     )
@@ -870,7 +1653,8 @@ def page(request, study_id, section):
             raise Http404
     session_partition_form = None
     session_partition_rows = []
-    if dataset_revision and dataset_revision.status == 'ready':
+    if (dataset_revision and dataset_revision.status == 'ready'
+            and not dataset_inference_only):
         session_records = dataset_revision.inventory.get('sessions', [])
         reserved_ranges = dataset_revision.config.get('reserved_evaluation_ranges') or {}
         if not isinstance(reserved_ranges, dict):
@@ -939,8 +1723,18 @@ def page(request, study_id, section):
         if isinstance(snapshot_predictions, list):
             requested_prediction_ids = [value for value in snapshot_predictions
                                         if isinstance(value, str)]
-    pose_prediction_runs, selected_pose_prediction_ids = _pose_prediction_run_options(
-        study, dataset_revision, completed, requested_prediction_ids)
+    if section == 'reports':
+        pose_prediction_runs, selected_pose_prediction_ids = [], []
+    else:
+        pose_prediction_runs, selected_pose_prediction_ids = _pose_prediction_run_options(
+            study, dataset_revision, completed, requested_prediction_ids)
+    report_result = (services.load_execution_result(selected)
+                     if section == 'reports' and selected else None)
+    report_visuals = _report_visuals(report_result) if report_result else None
+    report_video = (_report_video_context(
+        study, dataset_revision, dataset_assets, asset_sessions, selected, report_result,
+        request.GET.get('video_session', ''))
+        if report_result and dataset_revision else None)
     frozen_reports = list(study.revision_set.filter(
         kind='frozen_report').order_by('-pk')[:50])
     return render(request, 'storm_studio/study.html', {
@@ -994,6 +1788,7 @@ def page(request, study_id, section):
         'pose_prediction_runs': pose_prediction_runs,
         'pose_prediction_job_ids': selected_pose_prediction_ids,
         'frozen_reports': frozen_reports,
+        'saved_analyses': study.revision_set.filter(kind='analysis').order_by('-pk'),
         'label_correction_taxonomy': (dataset_revision.inventory.get('taxonomy', [])
                                       if dataset_revision else []),
         'label_correction_url': reverse('label-correction', args=(study.pk,)),
@@ -1012,6 +1807,8 @@ def page(request, study_id, section):
             'label_frame_reference': (dataset_revision.config.get(
                 'label_frame_reference', 'pose') if dataset_revision else 'pose')}),
         'dataset_revision': dataset_revision, 'dataset_assets': dataset_assets,
+        'dataset_presets': list(ui_catalog.dataset_presets.values()),
+        'dataset_inference_only': dataset_inference_only,
         'asset_session_form': asset_session_form,
         'asset_session_rows': asset_session_rows,
         'session_partition_form': session_partition_form,
@@ -1021,7 +1818,19 @@ def page(request, study_id, section):
         'partition_rows': partition_rows,
         'resumable': resumable,
         'selected': selected, 'evidence': evidence, 'catalog': ui_catalog.describe(),
-        'evidence_kind': 'numeric' if numeric_evidence else 'categorical',
+        'analysis_metrics': analysis_metrics,
+        'evidence_page_number': evidence_page_number,
+        'evidence_page_count': evidence_page_count,
+        'evidence_total': evidence_total,
+        'evidence_page_first': evidence_page_first,
+        'evidence_page_last': evidence_page_last,
+        'evidence_page_base_query': evidence_page_base_query,
+        'evidence_visuals': evidence_visuals,
+        'evidence_plot_data': evidence_plot_data,
+        'evidence_feature_options': evidence_feature_options,
+        'evidence_kind': ('multivariate' if multivariate_evidence else
+                          'numeric' if numeric_evidence else 'categorical'),
+        'inference_only_benchmark': inference_only_benchmark,
         'output_metadata': output_metadata,
         'annotation': annotation, 'visualizers': ui_catalog.visualizations.available,
         'registered_steps': ui_catalog.steps.available,
@@ -1033,6 +1842,9 @@ def page(request, study_id, section):
         'selected_comparison_ids': [str(job.pk) for job in selected_comparison],
         'compared_jobs': compared_jobs,
         'comparison_metrics': comparison_metrics,
+        'report_visuals': report_visuals,
+        'report_video': report_video,
+        'report_selected_job': selected,
         'visual_state': restored_snapshot.payload.get('visual_state', {}) if restored_snapshot else {},
         'visual_state_json': json.dumps(restored_snapshot.payload.get('visual_state', {}) if restored_snapshot else {}),
         'restored_snapshot': restored_snapshot,
@@ -1050,6 +1862,37 @@ def page(request, study_id, section):
         'lineage': lineage,
         'revisions': study.revision_set.order_by('-pk'),
         'reviews': study.revision_set.filter(kind='review').order_by('-pk')})
+
+
+@require_POST
+def save_analysis(request, study_id):
+    study = get_object_or_404(Study, pk=study_id)
+    job = get_object_or_404(
+        Job, pk=request.POST.get('job'), revision__study=study, status='completed')
+    result = services.load_execution_result(job)
+    analysis = _posthoc_metric_analysis(
+        result, request.POST.getlist('metric'), services.catalog())
+    assessment = request.POST.get('assessment', 'continue')
+    if assessment not in {'continue', 'refine', 'hold'}:
+        assessment = 'hold'
+    Revision.objects.create(
+        study=study, kind='analysis', parent=job.revision,
+        payload={
+            'schema_version': 1,
+            'execution_id': str(job.pk),
+            'model': result.get('model'),
+            'data_fingerprint': result.get('data_fingerprint'),
+            'dataset_revision_id': (result.get('spec') or {}).get('dataset_revision_id'),
+            'metric_names': analysis['selected'],
+            'metrics': analysis['rows'],
+            'sample_count': analysis['sample_count'],
+            'metric_reason': analysis['reason'],
+            'question': request.POST.get('question', '').strip()[:2000],
+            'interpretation': request.POST.get('interpretation', '').strip()[:4000],
+            'assessment': assessment,
+        })
+    messages.success(request, 'Análisis guardado como una revisión trazable del estudio.')
+    return redirect(f'{reverse("page", args=(study.pk, "evidence"))}?job={job.pk}')
 
 
 @require_POST
@@ -1222,6 +2065,13 @@ def run(request, revision_id):
 
         dataset_revision = DatasetRevision.objects.filter(pk=dataset_revision_id).first()
         if dataset_revision is not None:
+            if (dataset_revision.config.get('inference_only') is True
+                    and revision.payload.get('operation') != 'infer'):
+                messages.error(
+                    request,
+                    'Este benchmark es solo para inferencia. Elegí un modelo guardado en '
+                    'Modelos y aplicalo sobre el benchmark.')
+                return redirect('page', revision.study_id, 'models')
             try:
                 require_review(revision.study, dataset_revision)
             except ValueError as error:
@@ -1354,6 +2204,7 @@ def action(request, job_id, operation):
                 'steps': source_spec.get('steps', payload.get('steps', [])),
             })
             payload.pop('preparation_revision_id', None)
+            payload.pop('label_correction_revision_id', None)
             payload.pop('branch_models', None)
             payload.pop('branch_configs', None)
             from django.db import transaction
@@ -1387,7 +2238,21 @@ def action(request, job_id, operation):
         if operation == 'resume':
             from storm.artifacts import FileArtifactStore
             FileArtifactStore(settings.ARTIFACT_ROOT).resolve(kind='checkpoints', artifact_id=str(job.pk))
-            services.submit(job.revision, previous=job, operation='resume', source=job)
+            revision = job.revision
+            requested_device = request.POST.get('device')
+            if requested_device:
+                component = services.catalog().get(job.revision.payload.get('model', ''))
+                device_schema = component.schema.get('properties', {}).get('device', {})
+                choices = device_schema.get('enum', [])
+                if requested_device not in choices:
+                    raise ValueError('Elegí un dispositivo disponible para este modelo.')
+                payload = deepcopy(job.revision.payload)
+                payload['config'] = dict(payload.get('config') or {})
+                payload['config']['device'] = requested_device
+                revision = Revision.objects.create(
+                    study=job.revision.study, kind='plan', parent=job.revision,
+                    payload=payload)
+            services.submit(revision, previous=job, operation='resume', source=job)
             return redirect('page', job.revision.study_id, 'jobs')
         if operation == 'review':
             services.propose(job, seed=42, strategy=request.POST.get('strategy', 'random'))
@@ -1467,19 +2332,27 @@ def report(request, job_id, format):
         writer.writerows(zip(job.result['indices'], job.result['predictions']))
         response = HttpResponse(stream.getvalue(), content_type='text/csv')
     elif format == 'html':
+        result = services.load_execution_result(job)
+        visuals = _report_visuals(result)
         response = render(request, 'storm_studio/report.html', {
             'job': job,
-            'manifest': json.dumps(services.load_execution_result(job), indent=2),
+            'report_visuals': visuals,
+            'manifest': json.dumps(
+                _html_report_manifest(result, visuals=visuals),
+                indent=2, ensure_ascii=False, default=str),
         })
     else:
         raise Http404
-    response['Content-Disposition'] = f'attachment; filename="storm-{job.pk}.{format}"'
+    disposition = 'inline' if format == 'html' else 'attachment'
+    response['Content-Disposition'] = f'{disposition}; filename="storm-{job.pk}.{format}"'
     return response
 
 
 def aggregate_report(request, study_id, format):
     study = get_object_or_404(Study, pk=study_id)
-    jobs = list(Job.objects.filter(revision__study=study, status='completed').order_by('created'))
+    jobs = list(Job.objects.filter(
+        revision__study=study, status='completed'
+    ).exclude(operation__in=('inventory', 'prepare', 'video_preview')).order_by('created'))
     payload = {'study': study.pk, 'jobs': [
         {'execution_id': str(job.pk), 'model': job.result.get('model'),
          'metrics': job.result.get('metrics', {}), 'partition': job.result.get('partition'),
@@ -1495,11 +2368,34 @@ def aggregate_report(request, study_id, format):
             writer.writerow([row['execution_id'], row['model'], row['partition'], json.dumps(row['metrics'])])
         response = HttpResponse(stream.getvalue(), content_type='text/csv')
     elif format == 'html':
-        response = HttpResponse('<html><body><h1>STORM aggregate report</h1><pre>'
-                                + json.dumps(payload, indent=2) + '</pre></body></html>')
+        visual_runs = []
+        comparable_visual_jobs = []
+        for job in jobs:
+            if job.operation in {'inventory', 'prepare', 'video_preview'}:
+                continue
+            result = services.load_execution_result(job)
+            visuals = _report_visuals(result)
+            visual_runs.append({
+                'job': job, 'result': result, 'visuals': visuals,
+                'prediction_chart_id': f'prediction-distribution-{job.pk}',
+                'metric_chart_id': f'metrics-{job.pk}',
+                'prediction_title_id': f'prediction-title-{job.pk}',
+                'metric_title_id': f'metric-title-{job.pk}',
+            })
+            comparable_visual_jobs.append(SimpleNamespace(pk=job.pk, result=result))
+        response = render(request, 'storm_studio/aggregate_report.html', {
+            'study': study,
+            'visual_runs': visual_runs,
+            'comparison_metrics': _comparison_metric_visuals(comparable_visual_jobs),
+            'comparable': services.comparable(comparable_visual_jobs),
+            'comparison_reasons': services.compare_reasons(comparable_visual_jobs),
+            'manifest': json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        })
     else:
         raise Http404
-    response['Content-Disposition'] = f'attachment; filename="storm-study-{study.pk}.{format}"'
+    disposition = 'inline' if format == 'html' else 'attachment'
+    response['Content-Disposition'] = (
+        f'{disposition}; filename="storm-study-{study.pk}.{format}"')
     return response
 
 
@@ -1590,8 +2486,9 @@ def frozen_study_report(request, revision_id, format):
         })
     else:
         raise Http404
+    disposition = 'inline' if format == 'html' else 'attachment'
     response['Content-Disposition'] = (
-        f'attachment; filename="storm-study-report-r{frozen.pk}.{format}"')
+        f'{disposition}; filename="storm-study-report-r{frozen.pk}.{format}"')
     return response
 
 
@@ -1644,6 +2541,7 @@ def status(request, study_id):
         'eta_seconds': job.eta_seconds,
         'eta_text': job.eta_text,
         'eta_basis': job.eta_basis,
+        'logs': job.activity,
     } for job in jobs]})
 
 
@@ -1919,6 +2817,12 @@ def _parse_video_range(header, size):
 @require_POST
 def upload_data(request, study_id):
     study = get_object_or_404(Study, pk=study_id)
+    if (study.dataset_revision_id
+            and study.dataset_revision.config.get('inference_only') is True):
+        messages.error(
+            request,
+            'Este benchmark está protegido. Cargá nuevas fuentes en otro estudio para entrenar.')
+        return redirect('page', study.pk, 'data')
     form = DatasetUploadForm(request.POST, request.FILES)
     if not form.is_valid():
         errors = '; '.join(str(error) for values in form.errors.values() for error in values)
@@ -1996,12 +2900,146 @@ def upload_data(request, study_id):
 
 
 @require_POST
+def import_data_preset(request, study_id):
+    """Copy a plugin-registered example dataset into this study's workspace."""
+    study = get_object_or_404(Study, pk=study_id)
+    preset_id = request.POST.get('preset_id', '')
+    ui_catalog = services.catalog()
+    preset = ui_catalog.dataset_presets.get(preset_id)
+    if preset is None:
+        messages.error(request, 'El benchmark seleccionado no está registrado.')
+        return redirect('page', study.pk, 'data')
+    prior_import = study.revision_set.filter(
+        kind='dataset_preset', payload__preset_id=preset_id).order_by('-pk').first()
+    if prior_import:
+        prior_dataset = DatasetRevision.objects.filter(
+            pk=prior_import.payload.get('dataset_revision_id')).first()
+        if prior_dataset:
+            study.dataset_revision = prior_dataset
+            study.save(update_fields=['dataset_revision'])
+            messages.info(request, 'El benchmark ya estaba registrado; se activó su revisión guardada.')
+            return redirect('page', study.pk, 'data')
+    active_config = (study.dataset_revision.config
+                     if study.dataset_revision_id else {})
+    if active_config.get('benchmark_preset_id') == preset_id:
+        messages.info(request, 'Este benchmark ya está registrado en el estudio.')
+        return redirect('page', study.pk, 'data')
+
+    try:
+        source_root = Path(preset['source_root']).expanduser().resolve(strict=True)
+        connector = preset['connector']
+        if connector not in ui_catalog.connectors:
+            raise ValueError(f'No está disponible el adapter de pose {connector}.')
+        source_assets = preset.get('assets')
+        if not isinstance(source_assets, list) or not source_assets:
+            raise ValueError('El benchmark no declara archivos de datos.')
+        prepared_assets = []
+        files_by_role = {role: [] for role in ('pose', 'roi', 'video', 'labels')}
+        pose_sessions = set()
+        for item in source_assets:
+            if not isinstance(item, dict) or item.get('role') not in files_by_role:
+                raise ValueError('El benchmark contiene un tipo de archivo no admitido.')
+            session_id = item.get('session_id', '')
+            if not isinstance(session_id, str):
+                raise ValueError('Cada archivo debe declarar un ID de sesión válido.')
+            path = Path(item.get('source_path', '')).expanduser().resolve(strict=True)
+            try:
+                path.relative_to(source_root)
+            except ValueError as error:
+                raise ValueError('Un archivo del benchmark está fuera de su carpeta registrada.') from error
+            if not path.is_file():
+                raise ValueError(f'No se encontró el archivo del benchmark: {path.name}.')
+            role = item['role']
+            files_by_role[role].append(SimpleNamespace(name=path.name))
+            prepared_assets.append({'role': role, 'path': path, 'session_id': session_id})
+            if role == 'pose':
+                if not session_id or session_id in pose_sessions:
+                    raise ValueError('Cada sesión del benchmark debe tener un archivo de pose único.')
+                pose_sessions.add(session_id)
+        validate_uploads(connector, files_by_role)
+        if not pose_sessions:
+            raise ValueError('El benchmark no incluye archivos de pose.')
+
+        raw_config = preset.get('config') or {}
+        if not isinstance(raw_config, dict):
+            raise ValueError('La configuración del benchmark debe ser un objeto.')
+        config = dict(raw_config)
+        inference_only = config.get('inference_only', False)
+        if type(inference_only) is not bool:
+            raise ValueError('inference_only debe ser booleano.')
+        if inference_only:
+            config['session_partitions'] = {session: 'test' for session in sorted(pose_sessions)}
+        declared_partitions = config.get('session_partitions', {})
+        if (not isinstance(declared_partitions, dict)
+                or set(declared_partitions) - pose_sessions):
+            raise ValueError('Las particiones deben referirse a sesiones de pose registradas.')
+        config['benchmark_preset_id'] = preset_id
+        with ExitStack() as stack:
+            stored_assets = []
+            for item in prepared_assets:
+                source = stack.enter_context(item['path'].open('rb'))
+                uploaded = File(source, name=item['path'].name)
+                stored_assets.append((item, store_upload(settings.WORKSPACE, uploaded)))
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        messages.error(request, f'No se pudo cargar el benchmark: {error}')
+        return redirect('page', study.pk, 'data')
+
+    with transaction.atomic():
+        dataset = (study.dataset_revision.dataset if study.dataset_revision_id
+                   else Dataset.objects.create(name=study.name))
+        previous = dataset.revisions.order_by('-number').first()
+        assets = []
+        asset_sessions = {}
+        for item, source in stored_assets:
+            asset, _ = DatasetAsset.objects.get_or_create(
+                dataset=dataset, role=item['role'], sha256=source['sha256'],
+                defaults={
+                    'original_name': source['original_name'],
+                    'relative_path': source['relative_path'],
+                    'size_bytes': source['size_bytes'],
+                    'session_id': '' if item['session_id'] == 'global' else item['session_id'],
+                    'metadata': {'benchmark_preset_id': preset_id},
+                })
+            assets.append(asset)
+            asset_sessions[str(asset.pk)] = item['session_id']
+        config['asset_sessions'] = asset_sessions
+        revision = DatasetRevision.objects.create(
+            dataset=dataset, number=(previous.number + 1) if previous else 1,
+            connector=connector,
+            asset_ids=[asset.pk for asset in assets], config=config,
+            status='registered', inventory={
+                'assets': len(assets),
+                'roles': {role: sum(asset.role == role for asset in assets)
+                          for role in ('pose', 'roi', 'video', 'labels')},
+                'bytes': sum(asset.size_bytes for asset in assets),
+                'benchmark': preset.get('label', preset_id),
+            })
+        Revision.objects.create(study=study, kind='dataset_preset', payload={
+            'preset_id': preset_id, 'dataset_revision_id': revision.pk,
+            'inference_only': inference_only,
+            'assets': [{'role': asset.role, 'session_id': asset_sessions[str(asset.pk)],
+                        'sha256': asset.sha256} for asset in assets],
+        })
+        study.dataset_revision = revision
+        study.save(update_fields=['dataset_revision'])
+
+    messages.success(
+        request,
+        f"Benchmark '{preset.get('label', preset_id)}' registrado en revisión {revision.number}. "
+        'Inspeccioná los datos para habilitarlo al aplicar modelos guardados.')
+    return redirect('page', study.pk, 'data')
+
+
+@require_POST
 def save_asset_sessions(request, study_id):
     study = get_object_or_404(Study, pk=study_id)
     if not study.dataset_revision_id:
         messages.error(request, 'Registrá fuentes antes de asociarlas con sesiones.')
         return redirect('page', study.pk, 'data')
     current = study.dataset_revision
+    if current.config.get('inference_only') is True:
+        messages.error(request, 'Los vínculos del benchmark están protegidos para preservar su evaluación.')
+        return redirect('page', study.pk, 'data')
     assets_by_id = {asset.pk: asset for asset in DatasetAsset.objects.filter(
         dataset=current.dataset, pk__in=current.asset_ids)}
     assets = [assets_by_id[asset_id] for asset_id in current.asset_ids
@@ -2200,6 +3238,9 @@ def save_session_partitions(request, study_id):
         messages.error(request, 'Registrá e inspeccioná los datos antes de particionar sesiones.')
         return redirect('page', study.pk, 'data')
     current = study.dataset_revision
+    if current.config.get('inference_only') is True:
+        messages.error(request, 'Las particiones de este benchmark están bloqueadas para preservar la evaluación.')
+        return redirect('page', study.pk, 'data')
     sessions = [item['session_id'] for item in current.inventory.get('sessions', [])]
     if current.status != 'ready' or not sessions:
         messages.error(request, 'El inventario debe estar listo y contener sesiones.')

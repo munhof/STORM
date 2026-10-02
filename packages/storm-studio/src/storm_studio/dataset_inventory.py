@@ -80,6 +80,11 @@ def connector_input(dataset_revision_id: int, *, workspace, artifact_root=None) 
             'pose_session_ids': pose_session_ids,
             'fps': float(revision.config.get('fps', 30)),
             'key': revision.config.get('hdf_key') or None}
+    if revision.config.get('inference_only') is True:
+        data['inference_only'] = True
+    for key in ('canonical_taxonomy', 'label_mapping_by_session'):
+        if key in revision.config:
+            data[key] = revision.config[key]
     video_discontinuities = revision.inventory.get(
         'video_discontinuities_by_session', {})
     if isinstance(video_discontinuities, dict) and video_discontinuities:
@@ -214,7 +219,7 @@ def _inspect_timestamps(timestamps, fps, frame_count) -> dict:
     }
 
 
-def inspect_dataset(dataset_revision_id: int, *, workspace, artifact_root, catalog) -> dict:
+def inspect_dataset(dataset_revision_id: int, *, workspace, artifact_root, catalog, progress_callback=None) -> dict:
     revision = DatasetRevision.objects.select_related('dataset').get(pk=dataset_revision_id)
     DatasetRevision.objects.filter(pk=revision.pk).update(status='inspecting')
     assets_by_id = {asset.pk: asset for asset in DatasetAsset.objects.filter(
@@ -341,7 +346,8 @@ def inspect_dataset(dataset_revision_id: int, *, workspace, artifact_root, catal
     if len(csv_labels) != len(label_assets):
         warnings.append('El adapter de pose inspecciona CSV; otros formatos de anotación quedaron registrados sin alinear.')
 
-    loaded = connector(data)
+    from storm.observability import ExecutionObserver
+    loaded = ExecutionObserver(progress_callback, phase='inventory').call(connector, '__call__', data)
     if not isinstance(loaded, dict) or not isinstance(loaded.get('inputs'), list):
         raise ValueError('El adapter debe devolver observaciones en una lista llamada inputs.')
     row_count = len(loaded['inputs'])

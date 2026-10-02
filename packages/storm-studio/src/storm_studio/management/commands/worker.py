@@ -1,5 +1,7 @@
+import codecs
 import json
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -8,6 +10,23 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from storm_studio.models import Job
+
+
+WORKER_HEARTBEAT_SECONDS = 15
+
+
+def progress_heartbeat(progress, *, quiet_seconds):
+    """Describe a live child without implying that its model reported progress."""
+    progress = progress if isinstance(progress, dict) else {}
+    label = progress.get('label') or 'ejecutando una etapa sin porcentaje informado'
+    stage, total = progress.get('stage_index'), progress.get('stage_total')
+    prefix = f'Etapa {stage} de {total}: ' if stage and total else ''
+    message = f'El proceso sigue activo · {prefix}{label}'
+    step, units = progress.get('phase_step'), progress.get('phase_total')
+    if step is not None and units is not None:
+        message += (f" · último avance {step}/{units} "
+                    f"{progress.get('unit_label') or 'unidades'}")
+    return f'{message}; sin una actualización de avance hace {quiet_seconds} s.'
 
 
 def process_identity(pid):
@@ -83,24 +102,102 @@ class Command(BaseCommand):
                 job = Job.objects.filter(status='pending').order_by('created').first()
                 if job:
                     code = 'import django; django.setup(); from storm_studio.services import perform; perform(__import__("sys").argv[1])'
-                    child = subprocess.Popen([sys.executable, '-c', code, str(job.pk)])
-                    while child.poll() is None:
-                        if stopping:
-                            child.terminate()
-                            try:
-                                child.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                child.kill()
-                                child.wait()
-                            break
-                        time.sleep(.2)
-                        if Job.objects.filter(pk=job.pk, status='cancelled').exists():
-                            child.terminate()
-                            try:
-                                child.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                child.kill()
-                                child.wait()
+                    child = subprocess.Popen(
+                        [sys.executable, '-u', '-c', code, str(job.pk)],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+                    from storm_studio.services import append_job_logs
+
+                    append_job_logs(job.pk, ['Worker iniciado; esperando el primer avance.'])
+                    output = child.stdout
+                    selector = selectors.DefaultSelector()
+                    selector.register(output, selectors.EVENT_READ)
+                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+                    current_line = ''
+                    pending_logs = []
+                    last_flush = time.monotonic()
+                    last_progress = None
+                    last_progress_at = last_flush
+                    last_heartbeat_at = last_flush
+                    child_stopped = False
+                    try:
+                        while child.poll() is None or selector.get_map():
+                            if child.poll() is None and not child_stopped:
+                                cancelled = Job.objects.filter(
+                                    pk=job.pk, status='cancelled').exists()
+                                if stopping or cancelled:
+                                    child.terminate()
+                                    try:
+                                        child.wait(timeout=5)
+                                    except subprocess.TimeoutExpired:
+                                        child.kill()
+                                        child.wait()
+                                    child_stopped = True
+
+                            if selector.get_map():
+                                for key, _ in selector.select(timeout=.2):
+                                    chunk = os.read(key.fileobj.fileno(), 65536)
+                                    text = decoder.decode(chunk) if chunk else decoder.decode(
+                                        b'', final=True)
+                                    for character in text:
+                                        if character in '\r\n':
+                                            if current_line.strip():
+                                                pending_logs.append(current_line)
+                                            current_line = ''
+                                        else:
+                                            current_line += character
+                                            if len(current_line) >= 2_000:
+                                                pending_logs.append(current_line)
+                                                current_line = ''
+                                    if not chunk:
+                                        selector.unregister(key.fileobj)
+                            elif child.poll() is None:
+                                time.sleep(.2)
+
+                            current_job_progress = Job.objects.only('progress').get(
+                                pk=job.pk).progress
+                            if isinstance(current_job_progress, dict):
+                                label = current_job_progress.get('label')
+                                signature = (
+                                    current_job_progress.get('stage_index'), label,
+                                    current_job_progress.get('phase_step'),
+                                    current_job_progress.get('phase_total'),
+                                    current_job_progress.get('unit_label'))
+                                if label and signature != last_progress:
+                                    stage = current_job_progress.get('stage_index')
+                                    total = current_job_progress.get('stage_total')
+                                    prefix = (f'Etapa {stage} de {total}: '
+                                              if stage and total else '')
+                                    step = current_job_progress.get('phase_step')
+                                    units = current_job_progress.get('phase_total')
+                                    detail = ''
+                                    if step is not None and units is not None:
+                                        unit = current_job_progress.get('unit_label') or 'unidades'
+                                        detail = f' · avance {step} de {units} {unit}'
+                                    pending_logs.append(f'{prefix}{label}{detail}')
+                                    last_progress = signature
+                                    last_progress_at = time.monotonic()
+
+                            now = time.monotonic()
+                            if (child.poll() is None
+                                    and now - last_heartbeat_at >= WORKER_HEARTBEAT_SECONDS):
+                                pending_logs.append(progress_heartbeat(
+                                    current_job_progress,
+                                    quiet_seconds=int(now - last_progress_at)))
+                                last_heartbeat_at = now
+                            if pending_logs and (len(pending_logs) >= 10
+                                                 or now - last_flush >= 1
+                                                 or (child.poll() is not None
+                                                     and not selector.get_map())):
+                                append_job_logs(job.pk, pending_logs)
+                                pending_logs = []
+                                last_flush = now
+                        if current_line.strip():
+                            pending_logs.append(current_line)
+                        if pending_logs:
+                            append_job_logs(job.pk, pending_logs)
+                    finally:
+                        selector.close()
+                        output.close()
                     if child.returncode and not stopping:
                         Job.objects.filter(pk=job.pk, status__in=['pending', 'running']).update(
                             status='failed', error=f'Worker process exited {child.returncode}', finished=timezone.now())

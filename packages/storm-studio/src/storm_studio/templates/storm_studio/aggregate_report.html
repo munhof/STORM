@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reporte del estudio {{ study.pk }} · STORM</title>
+<style>
+  body{max-width:1100px;margin:40px auto;padding:0 18px;font:16px system-ui;color:#163047}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7fb;padding:16px;border-radius:8px}
+  table{border-collapse:collapse;width:100%;margin:12px 0 24px}td,th{padding:10px;border:1px solid #ccd;text-align:left}
+  figure{margin:12px 0;max-width:100%;overflow-x:auto}svg{width:100%;min-width:520px;height:auto}
+  .report-chart{padding:16px;border:1px solid #ccd;border-radius:10px;margin:18px 0}
+  .report-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;padding:12px;background:#f4f7fb;border-radius:10px}
+  .report-summary div{padding:8px}.report-summary dt{color:#52677c}.report-summary dd{margin:4px 0;font-size:1.2rem;font-weight:700}
+</style>
+<h1>Reporte visual del estudio · {{ study.name }}</h1>
+<section class="report-chart"><h2>Resumen del estudio</h2><p>{{ visual_runs|length }} corridas de modelos completadas con visuales disponibles.</p><p>El investigador determina si el experimento avanza. STORM presenta cobertura, métricas, distribución y límites de comparación para respaldar esa evaluación.</p></section>
+<p>Las corridas se muestran por separado. Cada gráfica reúne solo corridas que declaran la misma versión y dirección para esa métrica; comprobá datos y procedencia antes de interpretarlas como un ranking.</p>
+{% if comparable %}<p role="status">Las corridas pasan las comprobaciones de comparabilidad para ranking.</p>{% elif comparison_reasons %}<p role="status">Inspección visual solamente; no se habilita un ranking conjunto:</p><ul>{% for reason in comparison_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+{% if comparison_metrics %}
+<section class="report-chart" id="comparison-metrics-chart">
+  <h2>Comparación visual de métricas</h2>
+  {% for metric in comparison_metrics %}
+  <figure><figcaption>{{ metric.name }} · {{ metric.run_count }} corridas · dirección: {{ metric.direction }} · rango {{ metric.low }}–{{ metric.high }}</figcaption>
+    <svg viewBox="0 0 800 {{ metric.height }}" role="img" aria-label="{{ metric.name }} por corrida">
+      <line x1="70" y1="8" x2="730" y2="8" stroke="#9ab0c5" />
+      {% for point in metric.points %}
+      <circle cx="{{ point.x }}" cy="{{ point.y }}" r="7" fill="{{ point.color }}"><title>{{ point.model }} · {{ point.job }}: {{ point.value }}</title></circle>
+      <text x="8" y="{{ point.y|add:'5' }}" font-size="12">{{ point.model }}</text>
+      <text x="{{ point.x|add:'10' }}" y="{{ point.y|add:'5' }}" font-size="12">{{ point.value }}</text>
+      {% endfor %}
+    </svg>
+  </figure>
+  {% endfor %}
+</section>
+{% endif %}
+{% for run in visual_runs %}
+<section>
+  <h2>{{ run.result.model }} · corrida {{ run.job.pk }}</h2>
+  <p>Partición {{ run.result.partition|default:'desconocida' }} · fingerprint {{ run.result.data_fingerprint|default:'desconocido' }}</p>
+  {% include 'storm_studio/report_visuals.html' with report_visuals=run.visuals prediction_chart_id=run.prediction_chart_id metric_chart_id=run.metric_chart_id prediction_title_id=run.prediction_title_id metric_title_id=run.metric_title_id %}
+</section>
+{% empty %}<p>Este estudio todavía no tiene corridas de modelo completadas.</p>{% endfor %}
+<details><summary>Manifiesto agregado</summary><pre>{{ manifest }}</pre></details>
+</html>

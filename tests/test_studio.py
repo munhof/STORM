@@ -84,6 +84,53 @@ def test_execution_page_shows_live_progress_eta_and_checkpoint_resume(
     assert active_status['eta_text'] == '1 min 30 s'
 
 
+def test_execution_page_shows_expandable_bounded_worker_logs(client):
+    from storm_studio.models import Job, Project, Revision, Study
+    from storm_studio.services import append_job_logs
+
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Worker logs')
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'identity', 'config': {}, 'steps': [], 'data': {},
+    })
+    job = Job.objects.create(revision=plan, status='running', operation='train')
+    append_job_logs(job.pk, [f'mensaje {index}' for index in range(102)])
+    append_job_logs(job.pk, ['<script>mensaje de worker</script>'])
+
+    page = client.get(f'/studies/{study.pk}/jobs/')
+    status = client.get(f'/status/{study.pk}/').json()
+    job_status = next(item for item in status['jobs'] if item['id'] == str(job.pk))
+
+    assert page.status_code == 200
+    assert 'Últimos logs del proceso'.encode() in page.content
+    assert b'mensaje 0' not in page.content
+    assert b'mensaje 3' in page.content
+    assert b'&lt;script&gt;mensaje de worker&lt;/script&gt;' in page.content
+    assert len(job_status['logs']) == 100
+    assert job_status['logs'][-1]['message'] == '<script>mensaje de worker</script>'
+
+
+def test_execution_page_shows_current_progress_when_worker_logs_are_empty(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='No worker output yet')
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'vame_native', 'config': {}, 'steps': [], 'data': {},
+    })
+    Job.objects.create(revision=plan, status='running', operation='resume', progress={
+        'label': 'Preparando los datos para el modelo', 'stage_index': 2,
+        'stage_total': 5,
+    })
+
+    page = client.get(f'/studies/{study.pk}/jobs/')
+
+    assert page.status_code == 200
+    assert 'Preparando los datos para el modelo'.encode() in page.content
+    assert 'Etapa 2 de 5'.encode() in page.content
+    assert 'Últimos logs del proceso y sus avances (1)'.encode() in page.content
+
+
 def test_worker_progress_estimates_remaining_epochs_from_observed_rate(monkeypatch):
     from datetime import timedelta
     from django.utils import timezone
@@ -110,6 +157,67 @@ def test_worker_progress_estimates_remaining_epochs_from_observed_rate(monkeypat
     job.refresh_from_db()
     assert job.progress['fraction'] == 0.4
     assert job.progress['eta_seconds'] == 30
+
+
+@pytest.mark.django_db
+def test_completed_execution_keeps_a_visible_trace_for_all_core_stages(
+        client, settings, tmp_path):
+    from storm_studio.models import Project, Study, Revision
+    from storm_studio.services import perform, submit
+
+    settings.ARTIFACT_ROOT = tmp_path
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Trace')
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'online_mean', 'config': {},
+        'data': {'inputs': [0, 1, 2], 'targets': [2, 4, 9], 'train': [0, 1], 'test': [2]},
+    })
+    job = submit(plan)
+    perform(str(job.pk))
+
+    job.refresh_from_db()
+    trace = job.progress.get('trace', [])
+    assert {event['stage_index'] for event in trace} == {1, 2, 3, 4, 5}
+    assert any('Cargando y validando' in event['message'] for event in trace)
+    assert any('Guardando' in event['message'] for event in trace)
+
+    response = client.get(f'/status/{study.pk}/')
+    assert response.status_code == 200
+    status_job = next(item for item in response.json()['jobs'] if item['id'] == str(job.pk))
+    assert any('Preparando los datos para el modelo' in event['message']
+               for event in status_job['logs'])
+
+
+def test_batch_progress_is_visible_and_failure_keeps_the_last_safe_point(
+        client, settings, tmp_path, monkeypatch):
+    from storm_studio import services
+    from storm_studio.models import Project, Study, Revision
+    settings.ARTIFACT_ROOT = tmp_path
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Batch error')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    job = services.submit(plan)
+
+    def fail(spec, root, execution_id, catalog, *, progress_callback, **options):
+        progress_callback({
+            'phase': 'training', 'label': 'Entrenando', 'stage_index': 3, 'stage_total': 5,
+            'phase_step': 1, 'phase_total': 10, 'unit_label': 'épocas',
+            'batch_step': 3, 'batch_total': 4, 'epoch': 2,
+            'processed_observations': 6, 'total_observations': 8,
+            'throughput': 2.0, 'device': 'cuda', 'checkpoint_epoch': 1,
+        })
+        page = client.get(f'/studies/{study.pk}/jobs/').content.decode()
+        assert 'Lote 3 de 4' in page
+        assert '75%' in page
+        assert 'observaciones/s' in page
+        raise RuntimeError('simulated batch failure')
+
+    monkeypatch.setattr(services, 'execute', fail)
+    services.perform(str(job.pk))
+    job.refresh_from_db()
+    assert job.status == 'failed'
+    assert job.progress['failure_context']['batch_step'] == 3
+    assert job.progress['failure_context']['checkpoint_epoch'] == 1
+    assert job.progress['failure_context']['epoch'] == 2
+    assert job.progress['failure_context']['device'] == 'cuda'
 
 
 def test_processing_execution_uses_a_previous_matching_recipe_for_eta(client):
@@ -992,7 +1100,7 @@ def test_registered_pipeline_preview_transforms_only_a_bounded_sample(
 
 
 def test_preparation_worker_materializes_a_reusable_dataset_without_a_model(
-        client, settings, tmp_path):
+        client, settings, tmp_path, monkeypatch):
     from storm.artifacts import ArtifactRef, FileArtifactStore
     from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
     from storm_studio.services import enqueue_preparation, perform
@@ -1061,11 +1169,21 @@ def test_preparation_worker_materializes_a_reusable_dataset_without_a_model(
     assert prepared.config['source_dataset_revision_id'] == source.pk
     assert prepared.config['preparation_revision_id'] == recipe.pk
     assert not study.revision_set.filter(kind='plan').exists()
+    original_load = FileArtifactStore.load
+
+    def reuse_without_reloading_source(store_instance, reference):
+        if reference.artifact_id == source_ref.artifact_id:
+            pytest.fail('an already registered preparation should skip raw data loading')
+        return original_load(store_instance, reference)
+
+    monkeypatch.setattr(FileArtifactStore, 'load', reuse_without_reloading_source)
     repeat_job = enqueue_preparation(study, recipe)
     perform(str(repeat_job.pk))
     repeat_job.refresh_from_db()
     assert repeat_job.status == 'completed', repeat_job.error
     assert repeat_job.result['prepared_dataset_revision_id'] == prepared.pk
+    assert 'Se reutilizó la revisión procesada registrada'.encode() in client.get(
+        f'/studies/{study.pk}/jobs/').content
     assert DatasetRevision.objects.filter(dataset=dataset, connector='prepared_artifact').count() == 1
     data_page = client.get(f'/studies/{study.pk}/data/').content.decode()
     assert 'Datasets procesados' in data_page
@@ -1246,6 +1364,25 @@ def test_pose_orientation_names_resolve_after_coordinate_selection():
         'target_angle_degrees': 45,
         'degenerate_reference_policy': 'identity',
     }
+
+
+def test_pose_preparation_keeps_selected_acceleration_device():
+    from storm_studio.data_preparation import resolve_preparation_steps
+
+    resolved = resolve_preparation_steps(
+        [
+            {'type': 'pose.recenter', 'config': {
+                'center_bodypart': 'body', 'bodyparts': ['nose', 'body'],
+                'device': 'cuda'}},
+            {'type': 'pose.orient_coordinates', 'config': {
+                'from_bodypart': 'body', 'toward_bodypart': 'nose',
+                'device': 'cpu'}},
+        ],
+        ['body_x', 'body_y', 'nose_x', 'nose_y'],
+    )
+
+    assert resolved[0]['config']['device'] == 'cuda'
+    assert resolved[1]['config']['device'] == 'cpu'
 
 
 def test_preparation_fits_center_without_reserved_training_observations(
@@ -1610,6 +1747,40 @@ def test_evidence_marks_categorical_output_for_lane_visualization(client, settin
     assert response.status_code == 200
     assert b'data-visual-kind="categorical"' in response.content
     assert b'Carriles categ' in response.content
+
+
+def test_protected_benchmark_evidence_is_labeled_as_inference_only(client):
+    from storm_studio.models import Project, Study, Revision, Job
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='NOR test')
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'operation': 'infer', 'model': 'vame_native', 'data': {},
+    })
+    job = Job.objects.create(revision=plan, status='completed', operation='infer', result={
+        'model': 'vame_native', 'partition': 'test', 'indices': [0],
+        'predictions': [2], 'prediction_mask': [True], 'metrics': {'ari': 0.95},
+        'metric_indices': [0], 'metric_definitions': [{
+            'name': 'ari', 'version': '1', 'direction': 'maximize',
+        }],
+        'metric_reason': 'No hay métricas compatibles para mostrar.',
+        'spec': {'model': 'vame_native'}, 'output_metadata': {
+            'task': 'clustering', 'semantics': 'group identifiers',
+        },
+        'resolved_data': {
+            'inputs': [[1.0, 2.0]], 'targets': ['Known'], 'train': [],
+            'inference_only': True,
+        },
+    })
+
+    response = client.get(f'/studies/{study.pk}/evidence/?job={job.pk}')
+
+    assert response.status_code == 200
+    assert 'Evaluación protegida por inferencia'.encode() in response.content
+    assert 'Crear lote de revisión'.encode() not in response.content
+    assert 'El lote usa observaciones de entrenamiento'.encode() not in response.content
+    assert 'Si querés pedir una revisión humana'.encode() not in response.content
+    assert 'Métricas sobre etiquetas válidas'.encode() in response.content
+    assert '0,9500'.encode() in response.content
 
 
 def test_adoption_requires_and_records_a_human_justification(client, settings, tmp_path):
@@ -2011,6 +2182,10 @@ def test_frozen_study_report_keeps_runs_annotations_and_visual_state(client):
             {'start': 0, 'stop': 1, 'label': 'walk'}],
         'mapping': {}, 'author': 'Researcher', 'reason': 'Checked the video.',
     })
+    analysis = Revision.objects.create(study=study, kind='analysis', parent=plan, payload={
+        'execution_id': str(job.pk), 'question': '¿Separa las conductas?',
+        'assessment': 'refine', 'metrics': [{'name': 'accuracy', 'value': 0.5}],
+    })
     state = {'selected_jobs': [str(job.pk)], 'cursor': 1,
              'filters': {'pose_timeline': 'reference'}}
     snapshot = Revision.objects.create(study=study, kind='snapshot', payload={
@@ -2033,6 +2208,8 @@ def test_frozen_study_report_keeps_runs_annotations_and_visual_state(client):
     assert [(item['revision_id'], item['applies_to_run']) for item in annotations] == [
         (stale_annotation.pk, False), (annotation.pk, True),
     ]
+    assert payload['runs'][0]['analyses'][0]['revision_id'] == analysis.pk
+    assert payload['runs'][0]['analyses'][0]['payload']['question'] == '¿Separa las conductas?'
     assert payload['dataset_revisions'][0]['source_fingerprint'] == 'data-fingerprint'
 
     Job.objects.filter(pk=job.pk).update(result={**job.result, 'metrics': {'accuracy': 0.0}})
@@ -2046,8 +2223,9 @@ def test_frozen_study_report_keeps_runs_annotations_and_visual_state(client):
     csv_report = client.get(f'/reports/frozen/{frozen.pk}/csv/')
     assert b'mouse-a:0' in csv_report.content
     assert b'grooming' not in csv_report.content
-    assert b'Checked the video.' in client.get(
-        f'/reports/frozen/{frozen.pk}/html/').content
+    frozen_html = client.get(f'/reports/frozen/{frozen.pk}/html/')
+    assert b'Checked the video.' in frozen_html.content
+    assert '¿Separa las conductas?'.encode() in frozen_html.content
     invalid = client.post(f'/reports/studies/{study.pk}/freeze/', {
         'jobs': ['00000000-0000-0000-0000-000000000000'],
     })
@@ -2167,6 +2345,639 @@ def test_report_has_no_remote_dependencies(client, settings, tmp_path):
         response = client.get(f'/reports/{job.pk}/{extension}/')
         assert response.status_code == 200
         assert b'https://' not in response.content
+
+
+@pytest.mark.django_db
+def test_reports_show_visuals_and_a_session_aligned_video_player(
+        client, settings, tmp_path):
+    from storm_studio.models import (
+        Dataset, DatasetAsset, DatasetRevision, Job, Project, Revision, Study,
+    )
+    from storm_studio.pose_preview import write_pose_preview_store
+
+    settings.WORKSPACE = tmp_path / 'workspace'
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    video_path = settings.WORKSPACE / 'data_sources' / 'mouse.mp4'
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b'video')
+    dataset = Dataset.objects.create(name='Visual report data')
+    video = DatasetAsset.objects.create(
+        dataset=dataset, role='video', original_name='mouse.mp4',
+        relative_path='data_sources/mouse.mp4', sha256='a' * 64,
+        size_bytes=5, session_id='mouse-a')
+    second_video = DatasetAsset.objects.create(
+        dataset=dataset, role='video', original_name='mouse-b.mp4',
+        relative_path='data_sources/mouse-b.mp4', sha256='c' * 64,
+        size_bytes=5, session_id='mouse-b')
+    pose_store = write_pose_preview_store({
+        'inputs': [[10.0, 20.0], [11.0, 21.0], [12.0, 22.0], [30.0, 40.0]],
+        'feature_names': ['nose_x', 'nose_y'],
+        'frames': [0, 1, 2, 0], 'video_frames': [0, 1, 2, 0],
+        'sessions': ['mouse-a'] * 3 + ['mouse-b'],
+        'segments': ['clip-1'] * 3 + ['clip-b'],
+    }, root=settings.ARTIFACT_ROOT, artifact_id='report-pose-preview')
+    data_revision = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5',
+        asset_ids=[video.pk, second_video.pk],
+        status='ready', config={'fps': 30, 'asset_sessions': {
+            str(video.pk): 'mouse-a', str(second_video.pk): 'mouse-b'}},
+        inventory={'source_fingerprint': 'report-source', 'assets': 1,
+                   'feature_names': ['nose_x', 'nose_y'],
+                   'pose_preview_store': pose_store})
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Visual report',
+        dataset_revision=data_revision)
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'example_simple', 'dataset_revision_id': data_revision.pk,
+    })
+    result = {
+        'model': 'example_simple', 'partition': 'test',
+        'data_fingerprint': 'report-source',
+        'metrics': {'accuracy': 0.75, 'f1': 0.67},
+        'metric_definitions': [
+            {'name': 'accuracy', 'direction': 'maximize'},
+            {'name': 'f1', 'direction': 'maximize'},
+        ],
+        'indices': [0, 1, 2, 3], 'predictions': [0, 1, 1, 0],
+        'prediction_mask': [True, True, True, True],
+        'resolved_data': {
+            'inputs': [[0.1], [0.2], [0.3], [0.4]], 'targets': [0, 1, 1, 0],
+            'observation_ids': ['mouse-a:0', 'mouse-a:1', 'mouse-a:2', 'mouse-b:0'],
+            'sessions': ['mouse-a'] * 3 + ['mouse-b'], 'frames': [0, 1, 2, 0],
+            'video_frames': [0, 1, 2, 0],
+            'segments': ['clip-1', 'clip-1', 'clip-2', 'clip-b'],
+        },
+        'spec': {'dataset_revision_id': data_revision.pk, 'connector': 'dlc_h5'},
+        'output_metadata': {'semantics': 'behavior_classification'},
+    }
+    job = Job.objects.create(revision=plan, status='completed', result=result)
+    other_plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'example_wide', 'dataset_revision_id': data_revision.pk,
+    })
+    Job.objects.create(revision=other_plan, status='completed', result={
+        **result, 'model': 'example_wide', 'metrics': {'accuracy': 0.5, 'f1': 0.4},
+        'predictions': [1, 0, 1],
+    })
+
+    page = client.get(f'/studies/{study.pk}/reports/?job={job.pk}')
+    report = client.get(f'/reports/{job.pk}/html/')
+    aggregate = client.get(f'/reports/studies/{study.pk}/aggregate/html/')
+
+    assert page.status_code == 200
+    assert b'id="prediction-distribution-chart"' in page.content
+    assert b'id="comparison-metrics-chart"' in page.content
+    assert b'id="prediction-report-player"' in page.content
+    assert b'Comportamiento' in page.content and b'Pose' in page.content
+    assert f'/studies/{study.pk}/assets/{video.pk}/video/'.encode() in page.content
+    assert b'id="report-pose-endpoint"' in page.content
+    assert b'id="report-video-session-select"' in page.content
+    import json
+    import re
+    timeline = re.search(
+        rb'<script id="report-video-segments" type="application/json">(.*?)</script>',
+        page.content, re.S)
+    assert timeline
+    timeline_rows = json.loads(timeline.group(1))
+    assert [(row['start'], row['stop'], row['segment']) for row in timeline_rows] == [
+        (0, 1, 'clip-1'), (1, 2, 'clip-1'), (2, 3, 'clip-2'),
+    ]
+    second_session = client.get(
+        f'/studies/{study.pk}/reports/?job={job.pk}&video_session=mouse-b')
+    assert f'/studies/{study.pk}/assets/{second_video.pk}/video/'.encode() in second_session.content
+    assert report.status_code == 200
+    assert b'id="prediction-distribution-chart"' in report.content
+    assert b'id="metric-chart"' in report.content
+    assert aggregate.status_code == 200
+    assert b'id="comparison-metrics-chart"' in aggregate.content
+
+
+@pytest.mark.django_db
+def test_reports_explain_unavailable_pose_tab_without_aligned_pose_preview(
+        client, settings, tmp_path):
+    from storm_studio.models import (
+        Dataset, DatasetAsset, DatasetRevision, Job, Project, Revision, Study,
+    )
+
+    settings.WORKSPACE = tmp_path / 'workspace'
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    dataset = Dataset.objects.create(name='No pose preview')
+    video = DatasetAsset.objects.create(
+        dataset=dataset, role='video', original_name='mouse.mp4',
+        relative_path='data_sources/mouse.mp4', sha256='b' * 64,
+        size_bytes=5, session_id='mouse-a')
+    data_revision = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', asset_ids=[video.pk],
+        status='ready', config={'asset_sessions': {str(video.pk): 'mouse-a'}},
+        inventory={'source_fingerprint': 'no-pose-source', 'assets': 1})
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='No pose report',
+        dataset_revision=data_revision)
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'identity', 'dataset_revision_id': data_revision.pk,
+    })
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'identity', 'metrics': {}, 'indices': [0], 'predictions': [1],
+        'resolved_data': {
+            'inputs': [[1]], 'observation_ids': ['mouse-a:0'],
+            'sessions': ['mouse-a'], 'frames': [0],
+        },
+        'spec': {'dataset_revision_id': data_revision.pk},
+    })
+
+    page = client.get(f'/studies/{study.pk}/reports/?job={job.pk}')
+
+    assert page.status_code == 200
+    assert b'id="prediction-report-player"' in page.content
+    assert b'id="report-pose-tab"' in page.content
+    assert b'aria-describedby="report-pose-unavailable"' in page.content
+    assert b'pose visual registrada y alineada' in page.content
+    assert b'pose-preview-endpoint' not in page.content
+
+
+def test_report_visuals_label_vame_states_and_require_matching_metric_definitions():
+    from types import SimpleNamespace
+    from storm_studio.views import _comparison_metric_visuals, _report_visuals
+
+    visuals = _report_visuals({
+        'capabilities': ['group'], 'predictions': [0, 0, 2],
+        'prediction_mask': [True, True, True], 'metrics': {},
+    })
+    assert visuals['distribution_title'] == 'Distribución de estados'
+    assert [(row['label'], row['count']) for row in visuals['predictions']] == [
+        ('Estado 0', 2), ('Estado 2', 1),
+    ]
+    first = SimpleNamespace(pk='a', result={
+        'metrics': {'accuracy': 0.8},
+        'metric_definitions': [{'name': 'accuracy', 'version': '1',
+                                'direction': 'maximize'}],
+    })
+    second = SimpleNamespace(pk='b', result={
+        'metrics': {'accuracy': 0.9},
+        'metric_definitions': [{'name': 'accuracy', 'version': '2',
+                                'direction': 'maximize'}],
+    })
+    assert _comparison_metric_visuals([first, second]) == []
+    same_definition = SimpleNamespace(pk='c', result={
+        'model': 'supervised_wide', 'metrics': {'accuracy': 0.9},
+        'metric_definitions': [{'name': 'accuracy', 'version': '1',
+                                'direction': 'maximize'}],
+    })
+    no_metrics = SimpleNamespace(pk='d', result={
+        'model': 'vame_native', 'metrics': {}, 'metric_definitions': [],
+    })
+    charts = _comparison_metric_visuals([first, same_definition, no_metrics])
+    assert len(charts) == 1
+    assert charts[0]['run_count'] == 2
+    assert [point['job'] for point in charts[0]['points']] == ['a', 'c']
+
+
+def test_preparation_windowed_pose_uses_center_frame_for_visual_preview(
+        settings, tmp_path):
+    from storm.artifacts import ArtifactRef, FileArtifactStore
+    from storm.pipeline import PipelineStep
+    from storm_studio.data_preparation import materialize_preparation
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
+    from storm_studio.services import catalog
+
+    class TemporalWindowStep(PipelineStep):
+        step_type = 'pose.temporal_windows'
+
+        def __init__(self, *, offsets):
+            self.offsets = offsets
+
+        def process(self, context):
+            context.data = [[[value[0] - 100, value[1] - 100], value,
+                             [value[0] + 100, value[1] + 100]]
+                            for value in context.data]
+            return context
+
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    loaded = {
+        'inputs': [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+        'feature_names': ['nose_x', 'nose_y'],
+        'frames': [0, 1, 2], 'video_frames': [0, 1, 2],
+        'sessions': ['mouse'] * 3, 'segments': ['mouse:segment-0'] * 3,
+        'partitions': ['train', 'train', 'test'],
+    }
+    store = FileArtifactStore(settings.ARTIFACT_ROOT)
+    source_ref = store.save(kind='datasets', artifact_id='window-source', value=loaded)
+    dataset = Dataset.objects.create(name='Windowed pose')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        inventory={'frame_count': 3, 'feature_names': loaded['feature_names']},
+        artifact_ref=source_ref.to_dict())
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Windows',
+                                 dataset_revision=source)
+    recipe = Revision.objects.create(study=study, kind='preparation', payload={
+        'name': 'Ventanas', 'dataset_revision_id': source.pk,
+        'steps': [{'type': 'pose.temporal_windows', 'config': {'offsets': [-1, 0, 1]}}],
+    })
+    pipeline_catalog = catalog()
+    pipeline_catalog.steps.register(TemporalWindowStep)
+
+    result = materialize_preparation(
+        recipe.pk, 'window-run', artifact_root=settings.ARTIFACT_ROOT,
+        catalog=pipeline_catalog)
+
+    prepared_revision = DatasetRevision.objects.get(pk=result['prepared_dataset_revision_id'])
+    prepared = store.load(ArtifactRef.from_dict(prepared_revision.artifact_ref))
+    assert prepared['inputs'][1] == [[-97.0, -96.0], [3.0, 4.0], [103.0, 104.0]]
+    from storm_studio.pose_preview import read_pose_preview_page
+    preview = read_pose_preview_page(
+        root=settings.ARTIFACT_ROOT,
+        store_ref=prepared_revision.inventory['pose_preview_store'],
+        session_id='mouse', offset=0, limit=3)
+    assert [row['features'] for row in preview['rows']] == [
+        [1.0, 2.0], [3.0, 4.0], [5.0, 6.0],
+    ]
+
+
+def test_preparation_recovers_a_valid_orphan_artifact_without_transforming_again(
+        settings, tmp_path, monkeypatch):
+    from storm.artifacts import FileArtifactStore
+    from storm.config import fingerprint
+    from storm_studio import data_preparation
+    from storm_studio.data_preparation import materialize_preparation
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
+    from storm_studio.services import catalog
+
+    settings.ARTIFACT_ROOT = tmp_path / 'artifacts'
+    store = FileArtifactStore(settings.ARTIFACT_ROOT)
+    source_data = {
+        'inputs': [[1.0, 2.0], [3.0, 4.0]], 'feature_names': ['nose_x', 'nose_y'],
+        'partitions': ['train', 'test'], 'sessions': ['mouse', 'mouse'],
+        'frames': [0, 1], 'segments': ['clip', 'clip'],
+    }
+    source_ref = store.save(kind='datasets', artifact_id='orphan-source', value=source_data)
+    dataset = Dataset.objects.create(name='Recover preparation')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        inventory={'frame_count': 2, 'feature_names': source_data['feature_names']},
+        artifact_ref=source_ref.to_dict())
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Recovery',
+                                 dataset_revision=source)
+    recipe = Revision.objects.create(study=study, kind='preparation', payload={
+        'name': 'Sin cambios', 'dataset_revision_id': source.pk, 'steps': [],
+    })
+    pipeline_catalog = catalog()
+    steps = data_preparation.resolve_preparation_steps([], source_data['feature_names'])
+    versions = data_preparation._step_versions(steps, pipeline_catalog)
+    recipe_fingerprint = fingerprint({
+        'source': source.artifact_ref, 'steps': steps, 'step_versions': versions,
+    })
+    recovered_data = {
+        **source_data,
+        'preparation': {
+            'revision_id': recipe.pk, 'fingerprint': recipe_fingerprint,
+            'execution_id': 'interrupted-run', 'resolved_steps': [],
+            'step_versions': versions, 'source_dataset_revision_id': source.pk,
+            'fitted_steps': [], 'source_observation_indices': [0, 1],
+            'stage_preview': [],
+        },
+    }
+    orphan_ref = store.save(
+        kind='datasets', artifact_id=f'prepared-dataset-{dataset.pk}-r8',
+        value=recovered_data, metadata={
+            'source_dataset_revision': source.pk, 'preparation_revision': recipe.pk,
+            'preparation_fingerprint': recipe_fingerprint, 'step_versions': versions,
+            'execution_id': 'interrupted-run',
+        })
+    monkeypatch.setattr(
+        data_preparation, 'transform_aligned',
+        lambda *args, **kwargs: pytest.fail('matching orphan should be reused'))
+    original_load = FileArtifactStore.load
+
+    def load_only_orphan(store_instance, reference):
+        if reference.artifact_id == 'orphan-source':
+            pytest.fail('a recovered preparation should not reload the raw source')
+        return original_load(store_instance, reference)
+
+    monkeypatch.setattr(FileArtifactStore, 'load', load_only_orphan)
+
+    result = materialize_preparation(
+        recipe.pk, 'retry-run', artifact_root=settings.ARTIFACT_ROOT,
+        catalog=pipeline_catalog)
+
+    assert result['recovered'] is True
+    assert result['recovered_from_execution_id'] == 'interrupted-run'
+    recovered_revision = DatasetRevision.objects.get(pk=result['prepared_dataset_revision_id'])
+    assert recovered_revision.artifact_ref == orphan_ref.to_dict()
+    assert recovered_revision.config['recovered_artifact'] is True
+
+
+def test_report_visuals_summarize_state_bouts_and_frame_transitions():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'capabilities': ['group'], 'indices': [0, 1, 2, 3],
+        'predictions': [0, 0, 1, 0], 'prediction_mask': [True] * 4,
+        'resolved_data': {
+            'inputs': [[0], [0], [0], [0]], 'sessions': ['mouse'] * 4,
+            'segments': ['clip'] * 4, 'frames': [0, 1, 2, 3],
+        },
+    })
+
+    assert visuals['state_transitions'] == [
+        {'from': 'Estado 0', 'to': 'Estado 1', 'count': 1},
+        {'from': 'Estado 1', 'to': 'Estado 0', 'count': 1},
+    ]
+    assert [(row['label'], row['bouts'], row['mean_frames'])
+            for row in visuals['state_durations']] == [
+        ('Estado 0', 2, 1.5), ('Estado 1', 1, 1.0),
+    ]
+
+
+def test_state_diagnostics_do_not_bridge_frame_discontinuities():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'capabilities': ['group'], 'indices': [0, 1], 'predictions': [0, 1],
+        'prediction_mask': [True, True],
+        'resolved_data': {
+            'inputs': [[0], [0]], 'sessions': ['mouse', 'mouse'],
+            'segments': ['clip-a', 'clip-a'], 'frames': [12, 14],
+        },
+    })
+
+    assert visuals['state_transitions'] == []
+    assert all(row['bouts'] == 1 for row in visuals['state_durations'])
+
+
+def test_state_report_builds_colored_bout_histogram_and_transition_heatmap():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'capabilities': ['group'], 'indices': list(range(7)),
+        'predictions': [0, 0, 1, 1, 1, 0, 2],
+        'prediction_mask': [True] * 7,
+        'resolved_data': {
+            'inputs': [[0]] * 7, 'sessions': ['mouse'] * 7,
+            'segments': ['clip'] * 7, 'frames': list(range(7)),
+        },
+    })
+
+    histogram = visuals['state_duration_histogram']
+    assert [bucket['label'] for bucket in histogram['bins']] == ['1', '2–3']
+    assert [state['label'] for state in histogram['states']] == [
+        'Estado 0', 'Estado 1', 'Estado 2',
+    ]
+    assert len({state['color'] for state in histogram['states']}) == 3
+    assert [bar['count'] for bar in histogram['bins'][0]['bars']] == [1, 0, 1]
+    assert [bar['count'] for bar in histogram['bins'][1]['bars']] == [1, 1, 0]
+
+    matrix = visuals['state_transition_matrix']
+    assert matrix['labels'] == ['Estado 0', 'Estado 1', 'Estado 2']
+    assert [[cell['count'] for cell in row['cells']] for row in matrix['rows']] == [
+        [0, 1, 1], [1, 0, 0], [0, 0, 0],
+    ]
+    assert all(cell['background'] for row in matrix['rows'] for cell in row['cells'])
+
+
+def test_report_shows_state_charts_and_collapsible_value_tables(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='State visuals')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'vame_native'})
+    Job.objects.create(revision=plan, status='completed', result={
+        'model': 'vame_native', 'partition': 'test', 'capabilities': ['group'],
+        'indices': list(range(4)), 'predictions': [0, 0, 1, 1],
+        'prediction_mask': [True] * 4, 'resolved_data': {
+            'inputs': [[0]] * 4, 'sessions': ['mouse'] * 4,
+            'segments': ['clip'] * 4, 'frames': list(range(4)),
+        },
+    })
+
+    page = client.get(f'/studies/{study.pk}/reports/').content.decode()
+
+    assert 'id="state-duration-histogram"' in page
+    assert 'id="state-transition-matrix"' in page
+    assert 'Ver tabla de valores por episodio' in page
+    assert 'Ver recuentos exactos de transiciones' in page
+
+
+def test_report_visuals_bin_regression_outputs_instead_of_listing_each_value():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'indices': list(range(100)), 'predictions': [index / 10 for index in range(100)],
+        'prediction_mask': [True] * 100,
+        'output_metadata': {'task': 'regression'},
+        'resolved_data': {'inputs': [[index] for index in range(100)]},
+    })
+
+    assert visuals['distribution_title'] == 'Distribución de salida numérica'
+    assert len(visuals['predictions']) <= 20
+    assert sum(row['count'] for row in visuals['predictions']) == 100
+
+
+def test_report_visuals_measure_coverage_within_the_run_scope():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'indices': [5, 6, 7], 'predictions': [0, 1, 1],
+        'prediction_mask': [True, True, True],
+        'resolved_data': {
+            'inputs': [[value] for value in range(10)],
+            'targets': [None] * 10,
+        },
+    })
+
+    assert visuals['observation_count'] == 10
+    assert visuals['prediction_scope_count'] == 3
+    assert visuals['valid_prediction_count'] == 3
+    assert visuals['excluded_prediction_count'] == 0
+    assert visuals['outside_run_count'] == 7
+    assert visuals['prediction_coverage'] == 100.0
+
+
+def test_report_visuals_flag_classification_without_behavior_mapping():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'indices': [0, 1, 2], 'predictions': [0, 0, 1],
+        'prediction_mask': [True, True, True],
+        'output_metadata': {
+            'task': 'classification', 'category_mapping': {'0': 'unknown', '1': 'unknown'},
+        },
+    })
+
+    assert visuals['taxonomy_alignment_warning'] is True
+    assert [(row['label'], row['count']) for row in visuals['predictions']] == [
+        ('Clase 0 (sin correspondencia)', 2), ('Clase 1 (sin correspondencia)', 1),
+    ]
+
+
+def test_report_visuals_count_excluded_outputs_inside_the_run_scope():
+    from storm_studio.views import _report_visuals
+
+    visuals = _report_visuals({
+        'indices': [2, 4, 6], 'predictions': [0, 1, 1],
+        'prediction_mask': [True, False, True],
+        'resolved_data': {'inputs': [[value] for value in range(10)]},
+    })
+
+    assert visuals['prediction_scope_count'] == 3
+    assert visuals['valid_prediction_count'] == 2
+    assert visuals['excluded_prediction_count'] == 1
+    assert visuals['outside_run_count'] == 7
+    assert visuals['prediction_coverage'] == 66.7
+
+
+def test_evidence_displays_pose_vectors_as_features_not_categorical_labels(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Pose report')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'classifier'})
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'classifier', 'indices': [0, 1], 'predictions': [0, 1],
+        'prediction_mask': [True, True],
+        'output_metadata': {'task': 'classification', 'semantics': 'behavior_classification'},
+        'resolved_data': {
+            'inputs': [[0.25, 0.75], [0.5, 0.8]], 'feature_names': ['nose_x', 'nose_y'],
+            'targets': [0, 1], 'evaluation_mask': [True, True],
+        },
+    })
+
+    response = client.get(f'/studies/{study.pk}/evidence/?job={job.pk}')
+
+    assert response.status_code == 200
+    assert b'data-visual-kind="multivariate"' in response.content
+    assert b'id="evidence-feature-select"' in response.content
+    assert b'nose_x' in response.content and b'nose_y' in response.content
+    assert '2 características'.encode() in response.content
+    assert b'[0.25, 0.75]' not in response.content
+
+
+def test_analysis_and_reports_choose_run_before_showing_results(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Run dashboard')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'identity', 'indices': [5, 6], 'predictions': [1, 0],
+        'prediction_mask': [True, True], 'metrics': {}, 'partition': 'test',
+        'resolved_data': {
+            'inputs': [[value] for value in range(10)], 'targets': [None] * 10,
+        },
+    })
+
+    analysis = client.get(f'/studies/{study.pk}/evidence/?job={job.pk}').content.decode()
+    reports = client.get(f'/studies/{study.pk}/reports/?job={job.pk}').content.decode()
+
+    assert analysis.index('Elegir corrida para analizar') < analysis.index('id="analysis-dashboard"')
+    assert '2 de 2 observaciones evaluadas tienen una salida válida' in analysis
+    assert 'Otras 8 observaciones del dataset están fuera de esta corrida' in analysis
+    assert reports.index('id="report-run-select"') < reports.index('Congelar evidencia reproducible')
+    assert '2 / 2' in reports
+
+
+def test_analysis_page_calculates_registered_metrics_on_valid_labels(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Metrics')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'identity', 'indices': [0, 1, 2], 'predictions': [1, 0, 1],
+        'prediction_mask': [True, True, True], 'metrics': {}, 'metric_definitions': [],
+        'output_metadata': {'task': 'classification', 'semantics': 'behavior_classification'},
+        'resolved_data': {
+            'inputs': [[0], [1], [2]], 'targets': [1, 1, None],
+            'evaluation_mask': [True, True, False], 'taxonomy': ['rest', 'move'],
+            'sessions': ['mouse'] * 3, 'frames': [0, 1, 2],
+        },
+    })
+
+    page = client.get(f'/studies/{study.pk}/evidence/?job={job.pk}&metric=accuracy')
+
+    assert page.status_code == 200
+    assert 'Métricas exploratorias'.encode() in page.content
+    assert b'accuracy' in page.content
+    assert page.context['analysis_metrics'] == {
+        'choices': ['accuracy'], 'rows': [{'name': 'accuracy', 'value': 0.5,
+                                           'direction': 'maximize'}],
+        'sample_count': 2, 'reason': '', 'errors': [], 'selected': ['accuracy'],
+    }
+    assert b'0,5000' in page.content
+    assert b'2 observaciones etiquetadas y predichas' in page.content
+
+
+def test_analysis_page_limits_evidence_rows_and_keeps_metric_filter(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Paged evidence')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    count = 205
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'identity', 'indices': list(range(count)),
+        'predictions': [index % 2 for index in range(count)],
+        'prediction_mask': [True] * count, 'output_metadata': {'task': 'classification'},
+        'resolved_data': {
+            'inputs': [[index] for index in range(count)],
+            'targets': [index % 2 for index in range(count)],
+            'evaluation_mask': [True] * count, 'sessions': ['mouse'] * count,
+            'frames': list(range(count)),
+        },
+    })
+
+    page = client.get(
+        f'/studies/{study.pk}/evidence/?job={job.pk}&metric=accuracy&evidence_page=2')
+
+    assert page.status_code == 200
+    assert page.context['evidence_page_number'] == 2
+    assert len(page.context['evidence']) == 100
+    assert page.context['evidence'][0]['index'] == 100
+    assert f'job={job.pk}&amp;metric=accuracy&amp;evidence_page=3'.encode() in page.content
+
+
+def test_analysis_saves_researcher_interpretation_as_a_new_revision(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Decision trail')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'identity', 'indices': [0, 1], 'predictions': [1, 0],
+        'prediction_mask': [True, True], 'output_metadata': {'task': 'classification'},
+        'resolved_data': {
+            'inputs': [[0], [1]], 'targets': [1, 1],
+            'evaluation_mask': [True, True], 'taxonomy': ['rest', 'move'],
+        },
+    })
+
+    response = client.post(f'/studies/{study.pk}/analysis/save/', {
+        'job': str(job.pk), 'metric': ['accuracy'], 'question': '¿Separa movimiento?',
+        'interpretation': 'Aún confunde reposo con movimiento.', 'assessment': 'refine',
+    })
+
+    analysis = Revision.objects.get(study=study, kind='analysis')
+    assert response.status_code == 302
+    assert analysis.parent == plan
+    assert analysis.payload['execution_id'] == str(job.pk)
+    assert analysis.payload['metrics'][0]['value'] == 0.5
+    assert analysis.payload['question'] == '¿Separa movimiento?'
+    assert analysis.payload['assessment'] == 'refine'
+
+
+def test_html_report_collapses_full_manifest_and_shows_coverage(client):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Readable report')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    job = Job.objects.create(revision=plan, status='completed', result={
+        'model': 'identity', 'indices': [0, 1], 'predictions': [1, 0],
+        'prediction_mask': [True, False], 'metrics': {},
+        'resolved_data': {
+            'inputs': [[0], [1]], 'targets': [1, None],
+            'evaluation_mask': [True, False], 'sessions': ['mouse'] * 2,
+            'frames': [0, 1],
+        },
+    })
+
+    response = client.get(f'/reports/{job.pk}/html/')
+
+    assert response.status_code == 200
+    assert response['Content-Disposition'].startswith('inline;')
+    assert b'Cobertura de inferencia' in response.content
+    assert b'<details><summary>Resumen de procedencia</summary>' in response.content
 
 
 def test_human_annotation_revisions_record_author_reason_and_parent(client):
@@ -3360,3 +4171,139 @@ def test_comparison_shows_group_stability_without_claiming_human_accuracy(client
     assert 'Estabilidad entre corridas · ARI 1,0' in content
     assert 'No mide concordancia humana' in content
     assert 'Inspección solamente; no se habilita ranking conjunto.' in content
+
+
+def test_inference_only_dataset_rejects_training_submission():
+    from storm_studio import services
+    from storm_studio.models import (
+        Dataset, DatasetRevision, Job, Project, Revision, Study,
+    )
+
+    dataset = Dataset.objects.create(name='NOR test benchmark')
+    data_revision = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        config={'inference_only': True}, inventory={'sessions': []})
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Benchmark only',
+        dataset_revision=data_revision)
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'operation': 'train', 'model': 'identity', 'config': {}, 'steps': [],
+        'data': {}, 'dataset_revision_id': data_revision.pk,
+    })
+
+    with pytest.raises(ValueError, match='inference-only'):
+        services.submit(plan)
+
+    assert not Job.objects.filter(revision=plan).exists()
+
+
+def test_inference_only_dataset_requires_saved_group_model_for_inference(monkeypatch):
+    from storm.suite import Component, default_catalog
+    from storm_studio import services
+    from storm_studio.models import Dataset, DatasetRevision, Project, Revision, Study
+
+    catalog = default_catalog()
+    catalog.register(Component('test.group_infer', object, ('group', 'infer'), {}))
+    monkeypatch.setattr(services, 'catalog', lambda: catalog)
+    dataset = Dataset.objects.create(name='NOR test benchmark')
+    data_revision = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        config={'inference_only': True}, inventory={'sessions': []})
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Benchmark only',
+        dataset_revision=data_revision)
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'operation': 'infer', 'model': 'test.group_infer', 'config': {}, 'steps': [],
+        'data': {}, 'dataset_revision_id': data_revision.pk,
+    })
+
+    with pytest.raises(ValueError, match='completed model'):
+        services.submit(plan)
+
+
+def test_studio_imports_registered_inference_only_dataset_preset(
+        client, settings, tmp_path, monkeypatch):
+    from storm.suite import default_catalog
+    from storm_studio.models import DatasetAsset, Project, Study
+
+    source_root = tmp_path / 'preset'
+    source_root.mkdir()
+    pose_source = source_root / 'NOR_TS_01.h5'
+    pose_source.write_bytes(b'pose fixture')
+    catalog = default_catalog()
+    catalog.connectors['dlc_h5'] = lambda data: data
+    catalog.register_dataset_preset({
+        'id': 'example.inference_only', 'label': 'Inference only sample',
+        'description': 'Use registered test data only for model inference.',
+        'source_root': str(source_root), 'connector': 'dlc_h5',
+        'assets': [{'role': 'pose', 'source_path': str(pose_source),
+                    'session_id': 'NOR_TS_01'}],
+        'config': {'inference_only': True, 'fps': 25,
+                   'session_partitions': {'NOR_TS_01': 'test'}},
+    })
+    monkeypatch.setattr('storm_studio.views.services.catalog', lambda: catalog)
+    settings.WORKSPACE = tmp_path / 'workspace'
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Preset import')
+
+    page = client.get(f'/studies/{study.pk}/data/')
+    assert page.status_code == 200
+    assert b'Benchmarks de ejemplo' in page.content
+    assert b'Inference only sample' in page.content
+
+    response = client.post(f'/studies/{study.pk}/data/presets/', {
+        'preset_id': 'example.inference_only',
+    })
+
+    assert response.status_code == 302
+    study.refresh_from_db()
+    revision = study.dataset_revision
+    assert revision.connector == 'dlc_h5'
+    assert revision.config['inference_only'] is True
+    asset = DatasetAsset.objects.get(dataset=revision.dataset, role='pose')
+    assert asset.session_id == 'NOR_TS_01'
+    assert (settings.WORKSPACE / asset.relative_path).read_bytes() == b'pose fixture'
+    model_page = client.get(f'/studies/{study.pk}/models/')
+    assert model_page.status_code == 200
+    assert b'Evaluar el benchmark protegido' in model_page.content
+    assert b'no puede entrenar ni ajustar modelos' in model_page.content
+
+
+def test_connector_input_preserves_inference_only_policy_and_label_mapping(tmp_path):
+    from storm_studio.dataset_inventory import connector_input
+    from storm_studio.models import Dataset, DatasetAsset, DatasetRevision
+
+    pose_path = tmp_path / 'data_sources' / 'pose.h5'
+    labels_path = tmp_path / 'data_sources' / 'labels.csv'
+    pose_path.parent.mkdir()
+    pose_path.write_bytes(b'pose')
+    labels_path.write_text('Frame,object_a,object_b\n', encoding='utf-8')
+    dataset = Dataset.objects.create(name='NOR benchmark')
+    pose = DatasetAsset.objects.create(
+        dataset=dataset, role='pose', original_name='NOR_TS_01.h5',
+        relative_path=pose_path.relative_to(tmp_path).as_posix(),
+        sha256='a' * 64, size_bytes=4, session_id='NOR_TS_01')
+    labels = DatasetAsset.objects.create(
+        dataset=dataset, role='labels', original_name='labels.csv',
+        relative_path=labels_path.relative_to(tmp_path).as_posix(),
+        sha256='b' * 64, size_bytes=27, session_id='NOR_TS_01')
+    revision = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', asset_ids=[pose.pk, labels.pk],
+        config={
+            'inference_only': True,
+            'asset_sessions': {str(pose.pk): 'NOR_TS_01', str(labels.pk): 'NOR_TS_01'},
+            'session_partitions': {'NOR_TS_01': 'test'},
+            'canonical_taxonomy': ['Known', 'Novel'],
+            'label_mapping_by_session': {
+                'NOR_TS_01': {'object_a': 'Novel', 'object_b': 'Known'},
+            },
+        })
+
+    data = connector_input(revision.pk, workspace=tmp_path)
+
+    assert data['inference_only'] is True
+    assert data['test_session_ids'] == ['NOR_TS_01']
+    assert data['train_session_ids'] == []
+    assert data['canonical_taxonomy'] == ['Known', 'Novel']
+    assert data['label_mapping_by_session']['NOR_TS_01'] == {
+        'object_a': 'Novel', 'object_b': 'Known'}

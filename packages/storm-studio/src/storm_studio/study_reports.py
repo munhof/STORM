@@ -49,6 +49,8 @@ def freeze_study_report(study, job_ids, *, snapshot_revision_id=None):
                 dataset_revision.pk, _dataset_revision_record(dataset_revision))
         annotations = list(Revision.objects.filter(
             study=study, kind='annotations', payload__job=job_id).order_by('pk'))
+        analyses = list(Revision.objects.filter(
+            study=study, kind='analysis', payload__execution_id=job_id).order_by('pk'))
         result_fingerprint = result.get('data_fingerprint')
         annotation_records = [{
             **_revision_record(revision),
@@ -71,6 +73,7 @@ def freeze_study_report(study, job_ids, *, snapshot_revision_id=None):
                                          if dataset_revision is None else None),
             'result': result,
             'annotations': annotation_records,
+            'analyses': [_revision_record(revision) for revision in analyses],
         })
 
     review_revisions = list(Revision.objects.filter(

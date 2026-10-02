@@ -42,6 +42,7 @@ class PipelineContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
     state: dict[str, Any] = field(default_factory=dict)
+    progress_callback: Any = field(default=None, repr=False, compare=False)
     executions: list[StepExecution] = field(default_factory=list)
 
     def get_info(self, name: str, default: Any = None) -> Any:

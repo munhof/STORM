@@ -1,0 +1,76 @@
+<dl class="report-summary" aria-label="Cobertura de la corrida">
+  <div><dt>Predicciones válidas en esta corrida</dt><dd>{{ report_visuals.valid_prediction_count }} / {{ report_visuals.prediction_scope_count }}</dd></div>
+  <div><dt>Cobertura de inferencia en esta corrida</dt><dd>{{ report_visuals.prediction_coverage }}%</dd></div>
+  <div><dt>Observaciones con etiqueta evaluable</dt><dd>{{ report_visuals.labeled_observation_count }} / {{ report_visuals.prediction_scope_count }}</dd></div>
+  <div><dt>Predicciones excluidas</dt><dd>{{ report_visuals.excluded_prediction_count }}</dd></div>
+  {% if report_visuals.outside_run_count %}<div><dt>Observaciones fuera de esta corrida</dt><dd>{{ report_visuals.outside_run_count }} de {{ report_visuals.observation_count }}</dd></div>{% endif %}
+</dl>
+{% if report_visuals.taxonomy_alignment_warning %}<section class="card" role="status"><strong>Clases sin correspondencia conductual.</strong> La salida del modelo no está vinculada a la taxonomía del benchmark. La distribución muestra clases del modelo; no permite concluir qué conducta representa cada clase ni hacer un ranking contra esas etiquetas.</section>{% endif %}
+{% if report_visuals.predictions %}
+<section class="report-chart" aria-labelledby="{{ prediction_title_id }}">
+  <h3 id="{{ prediction_title_id }}">{{ report_visuals.distribution_title }}</h3>
+  <figure>
+    <svg id="{{ prediction_chart_id }}" viewBox="0 0 760 {{ report_visuals.prediction_height }}" role="img" aria-label="{{ report_visuals.distribution_title }} por categoría">
+      {% for row in report_visuals.predictions %}
+      <text x="8" y="{{ row.y|add:'5' }}" font-size="13">{{ row.label }}</text>
+      <rect x="300" y="{{ row.y|add:'-9' }}" width="{{ row.bar_width }}" height="17" rx="4" fill="{{ row.color }}"><title>{{ row.label }}: {{ row.count }} observaciones</title></rect>
+      <text x="{{ row.bar_width|add:'310' }}" y="{{ row.y|add:'5' }}" font-size="13">{{ row.count }}</text>
+      {% endfor %}
+    </svg>
+  </figure>
+  <details><summary>Ver tabla de frecuencias por categoría</summary><table><caption>Valores de la distribución</caption><thead><tr><th>Categoría</th><th>Observaciones</th></tr></thead><tbody>
+    {% for row in report_visuals.predictions %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>{% endfor %}
+  </tbody></table></details>
+</section>
+{% else %}<p>No hay predicciones válidas para graficar con la máscara de esta corrida.</p>
+{% endif %}
+{% if report_visuals.metrics %}
+<section class="report-chart" aria-labelledby="{{ metric_title_id }}">
+  <h3 id="{{ metric_title_id }}">Métricas</h3>
+  <figure>
+    <svg id="{{ metric_chart_id }}" viewBox="0 0 760 {{ report_visuals.metric_height }}" role="img" aria-label="Métricas de la ejecución">
+      {% for row in report_visuals.metrics %}
+      <text x="8" y="{{ row.y|add:'5' }}" font-size="13">{{ row.name }}</text>
+      <rect x="180" y="{{ row.y|add:'-9' }}" width="{{ row.bar_width }}" height="17" rx="4" fill="{{ row.color }}"><title>{{ row.name }}: {{ row.value }} · {{ row.direction }}</title></rect>
+      <text x="{{ row.bar_width|add:'190' }}" y="{{ row.y|add:'5' }}" font-size="13">{{ row.value }}</text>
+      {% endfor %}
+    </svg>
+  </figure>
+  <details><summary>Ver tabla de valores de métricas</summary><table><caption>Valores y dirección declarada</caption><thead><tr><th>Métrica</th><th>Valor</th><th>Dirección</th></tr></thead><tbody>
+    {% for row in report_visuals.metrics %}<tr><td>{{ row.name }}</td><td>{{ row.value }}</td><td>{{ row.direction }}</td></tr>{% endfor %}
+  </tbody></table></details>
+</section>
+{% else %}<p>No hay métricas numéricas registradas para esta corrida.</p>
+{% endif %}
+{% if report_visuals.state_durations %}
+<section class="report-chart" aria-labelledby="state-duration-title">
+  <h3 id="state-duration-title">Duración de los episodios</h3>
+  <p>El histograma agrupa la duración de cada episodio en intervalos 1, 2–3, 4–7 frames y así sucesivamente. Los episodios se cortan en cambios de sesión, segmento, saltos de frame y predicciones excluidas. El color identifica el estado; los IDs no implican un significado conductual.</p>
+  <div class="state-chart-legend" aria-label="Estados y colores del histograma">
+    {% for state in report_visuals.state_duration_histogram.states %}<span><i style="background:{{ state.color }}"></i>{{ state.label }}</span>{% endfor %}
+  </div>
+  <figure><svg id="state-duration-histogram" viewBox="0 0 800 {{ report_visuals.state_duration_histogram.height }}" role="img" aria-label="Histograma de duración de episodios por estado">
+    <line x1="52" y1="{{ report_visuals.state_duration_histogram.plot_top }}" x2="52" y2="{{ report_visuals.state_duration_histogram.plot_bottom }}" stroke="#60748a" />
+    <line x1="52" y1="{{ report_visuals.state_duration_histogram.plot_bottom }}" x2="790" y2="{{ report_visuals.state_duration_histogram.plot_bottom }}" stroke="#60748a" />
+    <text x="8" y="{{ report_visuals.state_duration_histogram.plot_top|add:'5' }}" font-size="12">{{ report_visuals.state_duration_histogram.max_count }}</text>
+    <text x="35" y="{{ report_visuals.state_duration_histogram.plot_bottom|add:'4' }}" font-size="12">0</text>
+    <text x="8" y="18" font-size="12">Episodios</text>
+    {% for bin in report_visuals.state_duration_histogram.bins %}
+      {% for bar in bin.bars %}<rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" rx="2" fill="{{ bar.color }}"><title>{{ bar.label }} · {{ bin.label }} frames: {{ bar.count }} episodios</title></rect>{% endfor %}
+      <text x="{{ bin.x }}" y="{{ report_visuals.state_duration_histogram.plot_bottom|add:'20' }}" text-anchor="middle" font-size="11">{{ bin.label }}</text>
+    {% endfor %}
+    <text x="400" y="232" text-anchor="middle" font-size="12">Duración del episodio · frames consecutivos</text>
+  </svg></figure>
+  <details><summary>Ver tabla de frecuencias del histograma</summary><div class="table-scroll"><table><caption>Episodios por intervalo y estado</caption><thead><tr><th>Duración (frames)</th>{% for state in report_visuals.state_duration_histogram.states %}<th>{{ state.label }}</th>{% endfor %}</tr></thead><tbody>{% for bin in report_visuals.state_duration_histogram.bins %}<tr><th scope="row">{{ bin.label }}</th>{% for bar in bin.bars %}<td>{{ bar.count }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></details>
+  <details><summary>Ver tabla de valores por episodio</summary><p>Se muestran hasta 1.000 episodios; total detectado: {{ report_visuals.state_bout_count }}.{% if report_visuals.state_bouts_truncated %} La tabla está limitada para mantener ágil el reporte; descargá los datos de predicción para consultar el resto.{% endif %}</p><div class="table-scroll"><table id="state-bouts-table"><caption>Duración de cada episodio detectado</caption><thead><tr><th>Episodio</th><th>Estado</th><th>Sesión</th><th>Segmento</th><th>Frame inicial</th><th>Frame final</th><th>Duración</th></tr></thead><tbody>{% for row in report_visuals.state_bouts %}<tr><td>{{ row.episode }}</td><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th><td>{{ row.session }}</td><td>{{ row.segment }}</td><td>{{ row.start_frame }}</td><td>{{ row.end_frame }}</td><td>{{ row.frames }} frames</td></tr>{% endfor %}</tbody></table></div></details>
+  <details><summary>Ver resumen por estado</summary><div class="table-scroll"><table><caption>Ocupación y duración resumidas</caption><thead><tr><th>Estado</th><th>Episodios</th><th>Frames ocupados</th><th>Ocupación</th><th>Duración media</th><th>Mínimo</th><th>Máximo</th></tr></thead><tbody>{% for row in report_visuals.state_durations %}<tr><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th><td>{{ row.bouts }}</td><td>{{ row.total_frames }}</td><td>{{ row.share_percent }}%</td><td>{{ row.mean_frames }}</td><td>{{ row.min_frames }}</td><td>{{ row.max_frames }}</td></tr>{% endfor %}</tbody></table></div></details>
+</section>
+{% endif %}
+{% if report_visuals.state_transition_matrix.rows %}<section class="report-chart" aria-labelledby="state-transition-title">
+  <h3 id="state-transition-title">Transiciones entre estados</h3>
+  <p>La fila indica el estado de origen y la columna el destino. El tono más intenso señala más transiciones. Solo se cuentan frames consecutivos del mismo segmento.</p>
+  <div class="state-chart-legend" aria-label="Colores del estado de origen">{% for row in report_visuals.state_transition_matrix.rows %}<span><i style="background:{{ row.color }}"></i>{{ row.label }}</span>{% endfor %}</div>
+  <div class="table-scroll"><table class="state-transition-matrix" id="state-transition-matrix"><caption>Frecuencia de transiciones · origen por destino</caption><thead><tr><th scope="col">Desde ↓ / hacia →</th>{% for label in report_visuals.state_transition_matrix.labels %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead><tbody>{% for row in report_visuals.state_transition_matrix.rows %}<tr><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th>{% for cell in row.cells %}<td style="background-color:{{ cell.background }};color:{{ cell.text_color }}" title="{{ row.label }} → {{ cell.target }}: {{ cell.count }}">{{ cell.count }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+  <details><summary>Ver recuentos exactos de transiciones</summary><table><caption>Transiciones observadas</caption><thead><tr><th>Desde</th><th>Hacia</th><th>Transiciones</th></tr></thead><tbody>{% for row in report_visuals.state_transitions %}<tr><th scope="row">{{ row.from }}</th><td>{{ row.to }}</td><td>{{ row.count }}</td></tr>{% empty %}<tr><td colspan="3">No se observaron cambios entre estados.</td></tr>{% endfor %}</tbody></table></details>
+</section>{% endif %}
+<style>.state-chart-legend{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0}.state-chart-legend span{display:inline-flex;align-items:center;gap:6px}.state-chart-legend i,.state-color-dot{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:6px}.state-transition-matrix{width:auto;min-width:520px}.state-transition-matrix th,.state-transition-matrix td{text-align:center;min-width:74px}.state-transition-matrix tbody th{text-align:left}</style>

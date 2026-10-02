@@ -1,0 +1,130 @@
+{% if selected %}
+<section class="card" aria-labelledby="evidence-title">
+  <h2 id="evidence-title">Evidencia de la corrida</h2>
+  <p><strong>{{ selected.result.model }}</strong> · {{ selected.pk }} · partición: {{ selected.result.partition }}</p>
+  <p class="muted">Semántica: {{ output_metadata.semantics|default:'no declarada' }}{% if output_metadata.confidence_semantics %} · confianza: {{ output_metadata.confidence_semantics }}{% endif %}{% if selected.result.source_execution %} · modelo recuperado desde {{ selected.result.source_execution }}{% endif %}</p>
+  {% if selected.result.metrics %}
+  <section class="card" aria-labelledby="benchmark-metrics-title">
+    <h3 id="benchmark-metrics-title">Métricas sobre etiquetas válidas de la corrida</h3>
+    <p>Calculadas con {{ selected.result.metric_indices|length }} observaciones después de aplicar las máscaras de etiquetas y predicciones.</p>
+    <table><thead><tr><th>Métrica</th><th>Valor</th><th>Dirección</th></tr></thead><tbody>
+      {% for metric_name, metric_value in selected.result.metrics.items %}<tr><td>{{ metric_name }}</td><td>{{ metric_value|floatformat:4 }}</td><td>{% for definition in selected.result.metric_definitions %}{% if definition.name == metric_name %}{{ definition.direction }}{% endif %}{% endfor %}</td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+  {% elif selected.result.metric_reason %}<section class="card" role="status"><h3>Métricas no disponibles</h3><p>{{ selected.result.metric_reason }}</p></section>{% endif %}
+  {% if evidence_kind == 'multivariate' %}
+  <label for="evidence-feature-select">Variable de pose para graficar</label>
+  {% if evidence_feature_options %}<select id="evidence-feature-select">{% for feature in evidence_feature_options %}<option value="{{ forloop.counter0 }}">{{ feature.name }}</option>{% endfor %}</select>
+  <p class="muted">El gráfico muestra esa variable a través de las observaciones de esta corrida. Si la entrada es una ventana temporal, se toma el frame central para respetar el ID alineado.</p>
+  {% else %}<p>No se pudieron extraer variables numéricas de estos vectores; la tabla conserva un resumen compacto.</p>{% endif %}
+  {% elif evidence_kind == 'categorical' %}<p id="evidence-kind" data-visual-kind="categorical">Carriles categóricos: los IDs y las categorías son etiquetas; sus valores no representan magnitudes.</p>
+  {% else %}<p id="evidence-kind" data-visual-kind="numeric">Tendencia numérica del dato, la predicción y la referencia.</p>{% endif %}
+  <div class="legend" aria-label="Leyenda de evidencia">{% if evidence_kind == 'multivariate' %}<span class="raw-key">Variable de pose seleccionada</span>{% else %}<span class="raw-key">Dato de entrada</span><span class="prediction-key">Predicción</span><span class="target-key">Referencia</span>{% endif %}</div>
+  <svg id="raw-view" viewBox="0 0 800 220" role="img" aria-label="Visualización de la evidencia alineada por observación"></svg>
+  <label for="cursor">Observación</label><input id="cursor" type="range" min="0" value="0" max="{{ evidence|length|add:'-1' }}">
+  <p id="selection" aria-live="polite"></p>
+  <div class="table-scroll"><table><thead><tr><th>ID original</th><th>Entrada</th><th>Predicción / grupo</th><th>Referencia</th><th>Confianza</th></tr></thead><tbody>
+    {% for row in evidence %}
+    <tr data-observation="{{ forloop.counter0 }}"><td>{{ row.index }}</td><td>
+      {% if row.raw_features %}<details><summary>{{ row.raw_summary }}</summary><dl>{% for feature in row.raw_features %}<div><dt>{{ feature.name }}</dt><dd>{{ feature.value }}</dd></div>{% endfor %}</dl></details>{% else %}{{ row.raw_summary }}{% endif %}
+    </td><td>{% if row.prediction_valid %}{{ row.prediction }}{% else %}<span class="muted">Ventana incompleta</span>{% endif %}</td><td>{{ row.target|default_if_none:'—' }}</td><td>{{ row.confidence|default_if_none:'—' }}</td></tr>
+    {% endfor %}
+  </tbody></table></div>
+  {% if inference_only_benchmark %}<p>Las etiquetas humanas de referencia están protegidas y solo se usan para evaluar inferencias.</p>{% else %}<p>El lote usa observaciones de entrenamiento y se revisa en la etapa Revisar.</p><form method="post" action="{% url 'action' selected.pk 'review' %}">{% csrf_token %}<button>Crear lote de revisión</button></form><a href="{% url 'page' study.pk 'review' %}">Ir a Revisar</a>{% endif %}
+</section>
+{{ evidence_plot_data|json_script:'evidence-data' }}
+<script>
+(() => {
+  const rows = JSON.parse(document.getElementById('evidence-data').textContent);
+  const svg = document.getElementById('raw-view');
+  const cursor = document.getElementById('cursor');
+  const selection = document.getElementById('selection');
+  const ns = 'http://www.w3.org/2000/svg';
+  const xAt = index => 28 + index * 744 / Math.max(1, rows.length - 1);
+  const addText = (x, y, text, color = '#30445b') => {
+    const node = document.createElementNS(ns, 'text');
+    node.setAttribute('x', String(x)); node.setAttribute('y', String(y));
+    node.setAttribute('font-size', '12'); node.setAttribute('fill', color);
+    node.textContent = text; svg.append(node);
+  };
+  let marker;
+  if (document.getElementById('evidence-feature-select')) {
+    const featureSelect = document.getElementById('evidence-feature-select');
+    const drawFeature = () => {
+      svg.replaceChildren();
+      const featureIndex = Number(featureSelect.value);
+      const values = rows.map(row => row.raw_features?.[featureIndex]?.value);
+      const valid = values.filter(value => typeof value === 'number' && Number.isFinite(value));
+      if (!valid.length) { addText(20, 110, 'No hay valores numéricos para esta variable.'); return; }
+      const low = Math.min(...valid), high = Math.max(...valid);
+      addText(12, 18, high.toPrecision(4)); addText(12, 207, low.toPrecision(4));
+      let segment = [];
+      const flush = () => {
+        if (segment.length < 2) { segment = []; return; }
+        const line = document.createElementNS(ns, 'polyline');
+        line.setAttribute('points', segment.join(' ')); line.setAttribute('fill', 'none');
+        line.setAttribute('stroke', '#1754ad'); line.setAttribute('stroke-width', '2');
+        svg.append(line); segment = [];
+      };
+      values.forEach((value, index) => {
+        if (typeof value !== 'number' || !Number.isFinite(value)) { flush(); return; }
+        const y = 196 - (value - low) * 172 / (high - low || 1);
+        segment.push(`${xAt(index)},${y}`);
+      });
+      flush();
+      marker = document.createElementNS(ns, 'line');
+      marker.setAttribute('y1', '8'); marker.setAttribute('y2', '210');
+      marker.setAttribute('stroke', '#a13232'); marker.setAttribute('stroke-width', '2');
+      svg.append(marker);
+    };
+    featureSelect.addEventListener('change', drawFeature);
+    drawFeature();
+  } else if (document.getElementById('evidence-kind')?.dataset.visualKind === 'categorical') {
+    svg.setAttribute('viewBox', '0 0 800 260');
+    [['raw', 'Entrada', '#1754ad'], ['prediction', 'Salida', '#7b3fb5'], ['target', 'Referencia', '#bd6400']]
+      .forEach(([key, label, color], lane) => {
+        const y = 24 + lane * 76; addText(8, y + 12, label, color);
+        rows.forEach((row, index) => {
+          const value = row[key]; if (value === null || value === undefined) return;
+          const width = 740 / Math.max(1, rows.length);
+          const rect = document.createElementNS(ns, 'rect');
+          rect.setAttribute('x', String(55 + index * width)); rect.setAttribute('y', String(y + 20));
+          rect.setAttribute('width', String(Math.max(2, width - 2))); rect.setAttribute('height', '30');
+          rect.setAttribute('fill', color); rect.setAttribute('fill-opacity', '.22'); rect.setAttribute('stroke', color);
+          const title = document.createElementNS(ns, 'title'); title.textContent = `ID ${row.index}: ${String(value)}`;
+          rect.append(title); svg.append(rect);
+        });
+      });
+  } else {
+    const all = rows.flatMap(row => [row.raw, row.prediction, row.target])
+      .filter(value => typeof value === 'number' && Number.isFinite(value));
+    if (all.length) {
+      const low = Math.min(...all), high = Math.max(...all);
+      const drawLine = (key, color, dash = '') => {
+        const values = rows.map(row => row[key]);
+        if (values.some(value => typeof value !== 'number' || !Number.isFinite(value))) return;
+        const line = document.createElementNS(ns, 'polyline');
+        line.setAttribute('points', values.map((value, index) =>
+          `${xAt(index)},${200 - (value - low) * 170 / (high - low || 1)}`).join(' '));
+        line.setAttribute('fill', 'none'); line.setAttribute('stroke', color); line.setAttribute('stroke-width', '3');
+        if (dash) line.setAttribute('stroke-dasharray', dash); svg.append(line);
+      };
+      drawLine('raw', '#1754ad'); drawLine('prediction', '#7b3fb5'); drawLine('target', '#bd6400', '8 5');
+    }
+    marker = document.createElementNS(ns, 'line');
+    marker.setAttribute('y1', '0'); marker.setAttribute('y2', '220');
+    marker.setAttribute('stroke', '#a13232'); marker.setAttribute('stroke-width', '2'); svg.append(marker);
+  }
+  const selectObservation = () => {
+    if (!rows.length) return;
+    const index = Number(cursor.value), row = rows[index];
+    selection.textContent = `ID ${row.index} · entrada ${row.raw_summary ?? row.raw} · salida ${row.prediction_valid ? row.prediction : 'ventana incompleta'} · referencia ${row.target ?? 'sin etiqueta'} · confianza ${row.confidence ?? 'no declarada'}`;
+    if (marker) { marker.setAttribute('x1', String(xAt(index))); marker.setAttribute('x2', String(xAt(index))); }
+    document.querySelectorAll('[data-observation]').forEach(node =>
+      node.classList.toggle('selected', Number(node.dataset.observation) === index));
+  };
+  cursor.addEventListener('input', selectObservation);
+  selectObservation();
+})();
+</script>
+{% else %}<p>No hay resultados para inspeccionar.</p>{% endif %}

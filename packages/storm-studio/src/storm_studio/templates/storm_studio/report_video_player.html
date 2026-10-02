@@ -1,0 +1,175 @@
+{% if report_video %}
+<section class="card" id="prediction-report-player" aria-labelledby="report-video-title">
+  <h3 id="report-video-title">Predicción sobre video · {{ report_video.model }}</h3>
+  <p>Sesión {{ report_video.session_id }} · {{ report_video.fps }} FPS. La banda de color respeta los segmentos registrados y no une predicciones a través de saltos.</p>
+  {% if report_video.available_sessions|length > 1 %}<form method="get" class="report-video-session"><input type="hidden" name="job" value="{{ report_video.job_id }}"><label for="report-video-session-select">Video de sesión</label><select id="report-video-session-select" name="video_session">{% for item in report_video.available_sessions %}<option value="{{ item.session_id }}"{% if item.session_id == report_video.session_id %} selected{% endif %}>{{ item.session_id }} · {{ item.name }}</option>{% endfor %}</select><button>Ver sesión</button></form>{% endif %}
+  <div role="tablist" aria-label="Capas del video">
+    <button type="button" id="report-behavior-tab" role="tab" aria-selected="true" aria-controls="report-behavior-panel">Comportamiento</button>
+    <button type="button" id="report-pose-tab" role="tab" aria-selected="false" aria-controls="report-pose-panel" tabindex="-1"{% if not report_video.pose_available %} disabled aria-describedby="report-pose-unavailable"{% endif %}>Pose</button>
+  </div>
+  {% if not report_video.pose_available %}<p id="report-pose-unavailable" role="status">No hay pose visual registrada y alineada para esta sesión. Podés <a href="{% url 'page' study.pk 'data' %}">actualizar el inventario en Datos</a> para generar la vista de pose.</p>{% endif %}
+  <div class="report-video-frame">
+    <video id="report-prediction-video" controls playsinline preload="metadata" aria-label="Video de la sesión {{ report_video.session_id }}"></video>
+    {% if report_video.pose_available %}<svg id="report-pose-overlay" viewBox="0 0 640 480" role="img" aria-label="Pose registrada sobre el video" hidden></svg>{% endif %}
+  </div>
+  <p id="report-video-status" role="status" aria-live="polite" hidden></p>
+  <form id="report-video-proxy-form" method="post" action="{{ report_video.prepare_url }}" hidden>{% csrf_token %}<button id="report-video-proxy-button" type="submit">Preparar copia MP4</button></form>
+  <section id="report-behavior-panel" role="tabpanel" aria-labelledby="report-behavior-tab">
+    <p id="report-behavior-readout" role="status" aria-live="polite">Reproducí o desplazá el video para consultar el comportamiento predicho.</p>
+    <figure class="report-video-timeline">
+      <svg id="prediction-report-timeline" viewBox="0 0 100 54" role="img" aria-label="Comportamientos predichos a lo largo de los frames">
+        {% for segment in report_video.segments %}<rect x="{{ segment.left }}" y="12" width="{{ segment.width }}" height="28" fill="{{ segment.color }}"><title>Frames {{ segment.start }}–{{ segment.stop }}: {{ segment.label }}</title></rect>{% endfor %}
+        <line id="report-video-marker" x1="0" x2="0" y1="4" y2="48" stroke="#111" stroke-width="1.3" />
+      </svg>
+    </figure>
+    <div class="report-video-legend">{% for item in report_video.legend %}<span><i style="background:{{ item.color }}"></i>{{ item.label }}</span>{% endfor %}</div>
+  </section>
+  <section id="report-pose-panel" role="tabpanel" aria-labelledby="report-pose-tab" hidden>
+    {% if report_video.pose_available %}
+    <p id="report-pose-readout" role="status" aria-live="polite">La pose se consulta por sesión y frame de video. No se dibujan puntos cuando no hay coordenadas para el frame exacto.</p>
+    <div class="report-video-legend">{% for part in report_video.pose_parts %}<span><i style="background:{{ part.color }}"></i>{{ part.name }}</span>{% endfor %}</div>
+    {% endif %}
+  </section>
+  <span id="report-video-source" hidden>{{ report_video.video_url }}</span>
+  <span id="report-video-type" hidden>{{ report_video.content_type }}</span>
+  <span id="report-video-fps" hidden>{{ report_video.fps }}</span>
+  <span id="report-video-range" hidden>{{ report_video.start_frame }},{{ report_video.stop_frame }}</span>
+  {% if report_video.pose_available %}<span id="report-pose-endpoint" hidden>{{ report_video.pose_endpoint }}</span>{% endif %}
+  {{ report_video.pose_feature_names|json_script:'report-pose-features' }}
+  {{ report_video.segments|json_script:'report-video-segments' }}
+</section>
+<style>
+  #prediction-report-player [role=tablist]{display:flex;gap:8px;margin:16px 0}
+  #report-pose-tab:disabled{opacity:.55;cursor:not-allowed}
+  .report-video-frame{position:relative;width:min(100%,960px);background:#111;line-height:0}
+  #report-prediction-video{display:block;width:100%;height:auto;max-height:70vh}
+  #report-pose-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  #prediction-report-timeline{display:block;width:100%;height:auto;min-height:50px;cursor:crosshair;background:#f3f6fa;border-radius:6px}
+  .report-video-legend{display:flex;gap:12px;flex-wrap:wrap}.report-video-legend span{display:inline-flex;align-items:center;gap:5px}
+  .report-video-legend i{display:inline-block;width:12px;height:12px;border-radius:3px}
+</style>
+<script>
+(() => {
+  const video = document.getElementById('report-prediction-video');
+  const source = document.getElementById('report-video-source').textContent.trim();
+  const mediaType = document.getElementById('report-video-type').textContent.trim();
+  const fps = Number(document.getElementById('report-video-fps').textContent) || 30;
+  const [rangeStart, rangeStop] = document.getElementById('report-video-range').textContent
+    .split(',').map(Number);
+  const segments = JSON.parse(document.getElementById('report-video-segments').textContent);
+  const behaviorTab = document.getElementById('report-behavior-tab');
+  const poseTab = document.getElementById('report-pose-tab');
+  const behaviorPanel = document.getElementById('report-behavior-panel');
+  const posePanel = document.getElementById('report-pose-panel');
+  const overlay = document.getElementById('report-pose-overlay');
+  const behaviorReadout = document.getElementById('report-behavior-readout');
+  const poseReadout = document.getElementById('report-pose-readout');
+  const marker = document.getElementById('report-video-marker');
+  const timeline = document.getElementById('prediction-report-timeline');
+  const proxyForm = document.getElementById('report-video-proxy-form');
+  const proxyButton = document.getElementById('report-video-proxy-button');
+  const videoStatus = document.getElementById('report-video-status');
+  const previewStatus = '{{ report_video.preview_status|escapejs }}';
+  let activeLayer = 'behavior';
+  let lastPoseFrame = null;
+  let poseRequestNumber = 0;
+  const poseEndpoint = document.getElementById('report-pose-endpoint')?.textContent.trim();
+  const poseFeatures = document.getElementById('report-pose-features')
+    ? JSON.parse(document.getElementById('report-pose-features').textContent) : [];
+
+  video.src = source;
+  video.addEventListener('error', () => {
+    videoStatus.hidden = false;
+    videoStatus.textContent = 'El navegador no pudo reproducir este archivo. Podés preparar una copia MP4 para revisarlo.';
+    proxyForm.hidden = false;
+  });
+  video.addEventListener('loadeddata', () => { videoStatus.hidden = true; });
+  if (['pending', 'running'].includes(previewStatus)) {
+    videoStatus.hidden = false;
+    videoStatus.textContent = 'Se está preparando una copia MP4 en segundo plano.';
+    proxyForm.hidden = false;
+    proxyButton.disabled = true;
+    proxyButton.textContent = 'Preparando copia MP4…';
+  } else if (previewStatus === 'failed') {
+    proxyButton.textContent = 'Reintentar copia MP4';
+  }
+  video.addEventListener('loadedmetadata', () => {
+    if (overlay && video.videoWidth && video.videoHeight) {
+      overlay.setAttribute('viewBox', `0 0 ${video.videoWidth} ${video.videoHeight}`);
+    }
+    if (video.currentTime === 0 && rangeStart > 0) video.currentTime = rangeStart / fps;
+  });
+  function selectLayer(layer) {
+    activeLayer = layer;
+    behaviorTab.setAttribute('aria-selected', String(layer === 'behavior'));
+    behaviorTab.tabIndex = layer === 'behavior' ? 0 : -1;
+    behaviorPanel.hidden = layer !== 'behavior';
+    if (poseTab) {
+      poseTab.setAttribute('aria-selected', String(layer === 'pose'));
+      poseTab.tabIndex = layer === 'pose' ? 0 : -1;
+      posePanel.hidden = layer !== 'pose';
+    }
+    if (overlay) overlay.hidden = layer !== 'pose';
+    if (layer === 'pose') paintPose(Math.floor(video.currentTime * fps));
+  }
+  behaviorTab.addEventListener('click', () => selectLayer('behavior'));
+  poseTab?.addEventListener('click', () => selectLayer('pose'));
+  function paintPose(frame) {
+    if (!overlay || !poseEndpoint || frame === lastPoseFrame) return;
+    lastPoseFrame = frame;
+    const requestNumber = ++poseRequestNumber;
+    overlay.replaceChildren();
+    const query = new URLSearchParams({session_id: '{{ report_video.session_id|escapejs }}',
+      frame: String(frame), frame_field: 'video_frame', limit: '64'});
+    fetch(`${poseEndpoint}?${query}`, {credentials: 'same-origin'})
+      .then(response => response.json().then(payload => ({response, payload})))
+      .then(({response, payload}) => {
+        if (requestNumber !== poseRequestNumber || activeLayer !== 'pose') return;
+        if (!response.ok) throw new Error(payload.error || 'No se pudo consultar la pose.');
+        const row = (payload.rows || []).find(item => Number(item.video_frame) === frame);
+        if (!row) { poseReadout.textContent = `Sin pose registrada para el frame ${frame}.`; return; }
+        const colors = ['#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#c77dff', '#f9844a'];
+        for (let i = 0; i < poseFeatures.length; i += 2) {
+          const xName = poseFeatures[i];
+          if (!xName?.endsWith('_x') || poseFeatures[i + 1] !== `${xName.slice(0, -2)}_y`) continue;
+          const x = row.features[i], y = row.features[i + 1];
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', x); circle.setAttribute('cy', y);
+          circle.setAttribute('r', Math.max(4, (video.videoWidth || 640) / 120));
+          circle.setAttribute('fill', colors[(i / 2) % colors.length]);
+          const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+          title.textContent = `${xName.slice(0, -2)} · (${x}, ${y})`;
+          circle.append(title); overlay.append(circle);
+        }
+        poseReadout.textContent = `Pose registrada · frame ${frame} · ${poseFeatures.length / 2} puntos posibles.`;
+      })
+      .catch(error => {
+        if (requestNumber === poseRequestNumber && activeLayer === 'pose') {
+          poseReadout.textContent = error.message;
+        }
+      });
+  }
+  function updateFrame() {
+    const frame = Math.floor(video.currentTime * fps);
+    const position = Math.max(0, Math.min(100, 100 * (frame - rangeStart) / Math.max(1, rangeStop - rangeStart)));
+    marker.setAttribute('x1', position); marker.setAttribute('x2', position);
+    const current = segments.find(item => item.start <= frame && frame < item.stop);
+    behaviorReadout.textContent = current
+      ? `Frame ${frame} · ${current.label}` : `Frame ${frame} · sin predicción válida.`;
+    if (activeLayer === 'pose') paintPose(frame);
+  }
+  video.addEventListener('timeupdate', updateFrame);
+  timeline.addEventListener('click', event => {
+    const bounds = timeline.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+    video.currentTime = (rangeStart + ratio * (rangeStop - rangeStart)) / fps;
+  });
+  if (!video.canPlayType(mediaType)) {
+    videoStatus.hidden = false;
+    videoStatus.textContent = 'El navegador no informa soporte para este formato. Prepará una copia MP4 para reproducirlo.';
+    proxyForm.hidden = false;
+  }
+})();
+</script>
+{% endif %}

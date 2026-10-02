@@ -238,8 +238,11 @@ class PlanForm(forms.Form):
     operation = forms.ChoiceField(label='Operación', choices=[('train', 'Entrenar / agrupar'),
                                                             ('infer', 'Inferir con adapter preentrenado')], required=False)
     model = forms.ChoiceField(label='Modelo')
-    metrics = forms.MultipleChoiceField(label='Métricas', required=False, initial=['mae', 'mse'],
-                                        widget=forms.CheckboxSelectMultiple)
+    metrics = forms.MultipleChoiceField(
+        label='Métricas', required=False, initial=[],
+        help_text=('Si no elegís métricas, Studio usa las compatibles con la salida: '
+                   'clasificación supervisada o agrupamiento.'),
+        widget=forms.CheckboxSelectMultiple)
     connector = forms.ChoiceField(label='Conector', required=False, initial='numeric_json')
     dataset_revision_id = forms.ChoiceField(
         label='Fuente de datos registrada', required=False,
