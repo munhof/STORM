@@ -47,7 +47,9 @@ class FileArtifactStore:
                 os.fsync(handle.fileno())
                 handle.seek(0)
                 digest = self._payload_digest(handle)
-            os.replace(temporary_path, location / 'payload.pkl')
+            payload_file = (f'payload-{digest.removeprefix("sha256:")}.pkl'
+                            if (location / 'manifest.json').exists() else 'payload.pkl')
+            os.replace(temporary_path, location / payload_file)
         finally:
             if temporary_path is not None and os.path.exists(temporary_path):
                 os.unlink(temporary_path)
@@ -61,6 +63,7 @@ class FileArtifactStore:
             "schema_version": 1,
             **reference.to_dict(),
             "serializer": "pickle",
+            "payload_file": payload_file,
             "metadata": json_compatible(dict(metadata or {})),
         }
         self._atomic_write(
@@ -75,7 +78,7 @@ class FileArtifactStore:
             raise ValueError(
                 f"Artifact reference for '{reference.artifact_id}' does not match its manifest."
             )
-        payload_path = self.root / resolved.uri / "payload.pkl"
+        payload_path = self.payload_path(resolved)
         with payload_path.open('rb') as handle:
             if self._payload_digest(handle) != resolved.digest:
                 raise ValueError(f"Artifact '{reference.artifact_id}' failed digest verification.")
@@ -88,6 +91,16 @@ class FileArtifactStore:
         for block in iter(lambda: handle.read(1024 * 1024), b''):
             digest.update(block)
         return f'sha256:{digest.hexdigest()}'
+
+    def payload_path(self, reference: ArtifactRef) -> Path:
+        location = self._location(kind=reference.kind, artifact_id=reference.artifact_id)
+        manifest = json.loads((location / 'manifest.json').read_text(encoding='utf-8'))
+        if ArtifactRef.from_dict(manifest) != reference:
+            raise ValueError('Artifact reference does not match its manifest.')
+        filename = manifest.get('payload_file', 'payload.pkl')
+        if filename not in {'payload.pkl', f'payload-{reference.digest.removeprefix("sha256:")}.pkl'}:
+            raise ValueError('Invalid artifact payload filename.')
+        return location / filename
 
     def resolve(self, *, kind: str, artifact_id: str) -> ArtifactRef:
         location = self._location(kind=kind, artifact_id=artifact_id)
@@ -106,6 +119,8 @@ class FileArtifactStore:
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", reference.digest)
             or manifest.get("schema_version") != 1
             or manifest.get("serializer") != "pickle"
+            or manifest.get('payload_file', 'payload.pkl') not in {
+                'payload.pkl', f'payload-{reference.digest.removeprefix("sha256:")}.pkl'}
         ):
             raise ValueError(f"Artifact manifest is invalid for '{artifact_id}'.")
         return reference

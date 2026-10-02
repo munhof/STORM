@@ -6,6 +6,24 @@ class UnserializableCheckpoint:
         raise RuntimeError('serialization interrupted')
 
 
+def test_failed_manifest_publication_keeps_previous_checkpoint(tmp_path, monkeypatch):
+    from storm.artifacts import FileArtifactStore
+    store = FileArtifactStore(tmp_path)
+    previous = store.save(kind='checkpoints', artifact_id='live', value={'epoch': 1})
+    original = store._atomic_write
+    def interrupted(path, content):
+        if path.name == 'manifest.json':
+            raise RuntimeError('manifest interrupted')
+        return original(path, content)
+    monkeypatch.setattr(store, '_atomic_write', interrupted)
+    with pytest.raises(RuntimeError, match='manifest interrupted'):
+        store.save(kind='checkpoints', artifact_id='live', value={'epoch': 2})
+    assert store.load(previous) == {'epoch': 1}
+    monkeypatch.setattr(store, '_atomic_write', original)
+    current = store.save(kind='checkpoints', artifact_id='live', value={'epoch': 2})
+    assert store.load(current) == {'epoch': 2}
+
+
 def test_failed_checkpoint_serialization_keeps_previous_artifact(tmp_path):
     from storm.artifacts import FileArtifactStore
 
@@ -18,6 +36,27 @@ def test_failed_checkpoint_serialization_keeps_previous_artifact(tmp_path):
     assert store.load(reference) == {'epoch': 1, 'optimizer': {'step': 10}}
     assert {path.name for path in (tmp_path / reference.uri).iterdir()} == {
         'payload.pkl', 'manifest.json'}
+
+
+def test_bundle_exports_the_payload_selected_by_the_manifest(tmp_path):
+    import hashlib
+    import io
+    import json
+    import zipfile
+    from storm.artifacts import FileArtifactStore
+    from storm_studio.study_bundles import _add_artifacts
+
+    store = FileArtifactStore(tmp_path)
+    store.save(kind='checkpoints', artifact_id='live', value={'epoch': 1})
+    reference = store.save(kind='checkpoints', artifact_id='live', value={'epoch': 2})
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as archive:
+        _add_artifacts(archive, [], set(), {('checkpoints', 'live'): reference.to_dict()}, tmp_path)
+    with zipfile.ZipFile(stream) as archive:
+        base = 'artifacts/checkpoints/live/'
+        manifest = json.loads(archive.read(base + 'manifest.json'))
+        payload = archive.read(base + manifest['payload_file'])
+        assert 'sha256:' + hashlib.sha256(payload).hexdigest() == reference.digest
 
 
 def test_artifact_round_trip_avoids_full_payload_byte_buffers(tmp_path, monkeypatch):

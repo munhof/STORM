@@ -177,7 +177,8 @@ def _add_artifacts(archive, files, members, references, artifact_root):
         location = _ensure_inside(artifact_root / actual.uri, artifact_root)
         base = f'artifacts/{kind}/{artifact_id}'
         _add_file(archive, files, members, f'{base}/manifest.json', location / 'manifest.json')
-        _add_file(archive, files, members, f'{base}/payload.pkl', location / 'payload.pkl',
+        payload_path = _ensure_inside(store.payload_path(actual), artifact_root)
+        _add_file(archive, files, members, f'{base}/{payload_path.name}', payload_path,
                   expected_digest=actual.digest.removeprefix('sha256:'))
 
 
