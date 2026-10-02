@@ -203,6 +203,41 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
         'feature_names', 'taxonomy', 'likelihood_bodyparts', 'likelihoods', 'frames',
         'sessions', 'segments', 'partitions', 'reserved_evaluation') if key in data}
 
+    def prepare_partition(name, values, indices, **options):
+        prefix = f'preparation-{recipe.pk}-{recipe_fingerprint.removeprefix("sha256:")}-{name}'
+        resume = None
+        for number in range(len(steps), 0, -1):
+            try:
+                saved = store.load(store.resolve(kind='preparation_steps',
+                                                 artifact_id=f'{prefix}-{number}'))
+            except FileNotFoundError:
+                continue
+            if saved.get('fingerprint') != recipe_fingerprint:
+                raise ValueError('Preparation step checkpoint fingerprint differs.')
+            resume = saved['state']
+            if progress_callback is not None:
+                progress_callback({'label': f'Preparación {name}: recuperados {number} de {len(steps)} pasos',
+                                   'phase_step': number, 'phase_total': len(steps),
+                                   'unit_label': 'pasos de preparación', 'checkpoint_saved': True,
+                                   'recovered_from_execution_id': saved['execution_id']})
+            break
+
+        def save_step(state):
+            number = state['completed_steps']
+            store.save(kind='preparation_steps', artifact_id=f'{prefix}-{number}',
+                       value={'fingerprint': recipe_fingerprint, 'state': state,
+                              'execution_id': execution_id}, metadata={
+                           'schema_version': 1, 'source_dataset_revision': source.pk,
+                           'preparation_revision': recipe.pk, 'partition': name,
+                           'completed_steps': number, 'step_versions': step_versions})
+            if progress_callback is not None:
+                progress_callback({'label': f'Punto de recuperación guardado: {name}, paso {number} de {len(steps)}',
+                                   'checkpoint_saved': True})
+
+        return transform_aligned(values, indices, steps, catalog=catalog,
+            context_metadata=metadata, progress_callback=progress_callback,
+            checkpoint_callback=save_step, resume_state=resume, **options)
+
     training_stage_trace = []
     checkpoint_id = f'preparation-{recipe.pk}-{recipe_fingerprint.removeprefix("sha256:")}-training'
     try:
@@ -224,10 +259,9 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
                                'checkpoint_saved': True,
                                'recovered_from_execution_id': checkpoint['execution_id']})
     else:
-        prepared_train, fitted, selected_train = transform_aligned(
-            [inputs[i] for i in train_indices], train_indices, steps,
-            catalog=catalog, context_metadata=metadata,
-            stage_trace=training_stage_trace, progress_callback=progress_callback,
+        prepared_train, fitted, selected_train = prepare_partition(
+            'training', [inputs[i] for i in train_indices], train_indices,
+            stage_trace=training_stage_trace,
             fit_observation_indices=fit_indices)
         store.save(kind='preparation_checkpoints', artifact_id=checkpoint_id, value={
             'fingerprint': recipe_fingerprint, 'train_indices': train_indices,
@@ -241,10 +275,9 @@ def materialize_preparation(revision_id, execution_id, *, artifact_root, catalog
                                'checkpoint_saved': True})
     evaluation_stage_trace = []
     if evaluation_indices:
-        prepared_evaluation, _, selected_evaluation = transform_aligned(
-            [inputs[i] for i in evaluation_indices], evaluation_indices, steps,
-            learned=fitted, catalog=catalog, context_metadata=metadata,
-            stage_trace=evaluation_stage_trace, progress_callback=progress_callback)
+        prepared_evaluation, _, selected_evaluation = prepare_partition(
+            'evaluation', [inputs[i] for i in evaluation_indices], evaluation_indices,
+            learned=fitted, stage_trace=evaluation_stage_trace)
     else:
         prepared_evaluation, selected_evaluation = [], []
         evaluation_stage_trace = [

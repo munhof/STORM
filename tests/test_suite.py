@@ -66,6 +66,30 @@ def test_inference_metrics_do_not_pool_session_local_states(tmp_path):
     assert execute(spec, tmp_path, 'shared-inference', catalog)['metrics'] == {'scoped-score': 1.0}
 
 
+def test_aligned_preparation_resumes_after_a_validated_step():
+    from storm.suite import transform_aligned
+    checkpoints = []
+    steps = [{'type': 'center'}, {'type': 'scale', 'factor': 2}]
+    def interrupt(update):
+        if update.get('label', '').startswith('Aplicando paso 2'):
+            raise RuntimeError('interrupted')
+    with pytest.raises(RuntimeError, match='interrupted'):
+        transform_aligned([2, 4], [0, 1], steps,
+                          context_metadata={'sessions': ['a', 'a']},
+                          checkpoint_callback=checkpoints.append, progress_callback=interrupt)
+    assert len(checkpoints) == 1
+    assert checkpoints[0]['completed_steps'] == 1
+    trace = []
+    values, fitted, selected = transform_aligned([2, 4], [0, 1], steps,
+        context_metadata={'sessions': ['a', 'a']}, resume_state=checkpoints[0], stage_trace=trace)
+    assert values == [-2, 2]
+    assert selected == [0, 1]
+    assert fitted == [{'type': 'center', 'value': 3}, {'type': 'scale', 'value': 2.0}]
+    assert [row['type'] for row in trace] == ['center', 'scale']
+    with pytest.raises(ValueError, match='checkpoint'):
+        transform_aligned([2, 4], [0, 1], [{'type': 'center'}], resume_state=checkpoints[0])
+
+
 def test_training_does_not_fit_on_evaluation_data(tmp_path):
     from storm.suite import execute, infer
     spec = {'model': 'mean_regressor', 'config': {}, 'seed': 42,

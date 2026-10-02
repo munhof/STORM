@@ -303,7 +303,8 @@ def transform(values, steps, learned=None, catalog=None, trace=None):
 
 def transform_aligned(values, observation_indices, steps, learned=None, catalog=None, trace=None,
                       context_metadata=None, stage_trace=None,
-                      fit_observation_indices=None, progress_callback=None):
+                      fit_observation_indices=None, progress_callback=None,
+                      checkpoint_callback=None, resume_state=None):
     """Prepare values while preserving an explicit mapping to source observations.
 
     A step that filters or reorders values must update
@@ -326,7 +327,30 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
     current_metadata = dict(original_metadata)
     for key in original_metadata.keys() - static_keys:
         current_metadata[key] = [original_metadata[key][index] for index in source_indices]
-    if not output and learned is not None:
+    initial_indices = list(source_indices)
+    completed_steps = 0
+    completed_trace = []
+    if resume_state is not None:
+        completed_steps = resume_state.get('completed_steps')
+        if (resume_state.get('steps') != steps
+                or resume_state.get('initial_indices') != initial_indices
+                or resume_state.get('fit_indices') != fit_observation_indices
+                or resume_state.get('learned') != learned
+                or type(completed_steps) is not int
+                or not 0 <= completed_steps <= len(steps)):
+            raise ValueError('Preparation checkpoint does not match this pipeline.')
+        output = list(resume_state['inputs'])
+        source_indices = list(resume_state['selected'])
+        fitted = list(resume_state['fitted'])
+        current_metadata = dict(resume_state['metadata'])
+        completed_trace = list(resume_state['stage_trace'])
+        if (len(output) != len(source_indices) or len(set(source_indices)) != len(source_indices)
+                or not set(source_indices).issubset(initial_indices)
+                or len(fitted) != completed_steps or len(completed_trace) != completed_steps):
+            raise ValueError('Invalid preparation checkpoint alignment.')
+        if stage_trace is not None:
+            stage_trace.extend(completed_trace)
+    if not output and learned is not None and resume_state is None:
         if len(learned) != len(steps):
             raise ValueError('Fitted step states must align with the pipeline steps')
         if stage_trace is not None:
@@ -335,6 +359,8 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
                 for step in steps)
         return [], list(learned), []
     for position, step in enumerate(steps):
+        if position < completed_steps:
+            continue
         if progress_callback is not None:
             progress_callback({
                 'label': f"Aplicando paso {position + 1} de {len(steps)}: {step['type']}",
@@ -398,16 +424,27 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
         current_metadata = next_metadata
         if trace is not None:
             trace.extend(dict(item.to_dict(), index=position) for item in context.executions)
-        if stage_trace is not None:
-            stage_trace.append({
+        if stage_trace is not None or checkpoint_callback is not None:
+            row = {
                 'type': step['type'],
                 'row_count': len(output),
                 'rows': [
                     {'observation_index': index, 'value': deepcopy(item)}
                     for index, item in zip(source_indices[:5], output[:5])
                 ],
-            })
+            }
+            completed_trace.append(row)
+            if stage_trace is not None:
+                stage_trace.append(row)
         fitted.append({'type': step['type'], 'value': value})
+        if checkpoint_callback is not None:
+            checkpoint_callback({
+                'steps': deepcopy(steps), 'initial_indices': initial_indices,
+                'fit_indices': fit_observation_indices, 'learned': learned,
+                'completed_steps': position + 1, 'inputs': output,
+                'selected': source_indices, 'fitted': list(fitted),
+                'metadata': current_metadata, 'stage_trace': list(completed_trace),
+            })
         if progress_callback is not None:
             progress_callback({
                 'label': f"Paso {position + 1} de {len(steps)} completado: {step['type']}",

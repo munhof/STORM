@@ -1294,7 +1294,8 @@ def test_preparation_fits_and_transforms_training_in_one_pass(
 
 
 @pytest.mark.django_db
-def test_preparation_recovers_training_partition_after_evaluation_interruption(tmp_path, monkeypatch):
+@pytest.mark.parametrize('interruption', ['evaluation', 'step'])
+def test_preparation_recovers_training_partition_after_evaluation_interruption(tmp_path, monkeypatch, interruption):
     from storm.artifacts import FileArtifactStore
     from storm.suite import default_catalog
     from storm_studio import data_preparation
@@ -1309,21 +1310,33 @@ def test_preparation_recovers_training_partition_after_evaluation_interruption(t
     study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
                                  dataset_revision=source)
     recipe = Revision.objects.create(study=study, kind='preparation', payload={
-        'dataset_revision_id': source.pk, 'steps': [{'type': 'center'}]})
+        'dataset_revision_id': source.pk,
+        'steps': [{'type': 'center'}, {'type': 'scale', 'factor': 2}]})
     original = data_preparation.transform_aligned
     calls = []
     def interrupted(*args, **kwargs):
         calls.append(kwargs.get('learned') is not None)
-        if kwargs.get('learned') is not None and len(calls) == 2:
+        if interruption == 'evaluation' and kwargs.get('learned') is not None and len(calls) == 2:
             raise RuntimeError('interrupted evaluation')
         return original(*args, **kwargs)
+    events = []
+    interrupted_once = False
+    def progress(update):
+        nonlocal interrupted_once
+        events.append(update)
+        if (interruption == 'step' and not interrupted_once
+                and update.get('label', '').startswith('Aplicando paso 2')):
+            interrupted_once = True
+            raise RuntimeError('interrupted step')
     monkeypatch.setattr(data_preparation, 'transform_aligned', interrupted)
-    with pytest.raises(RuntimeError, match='interrupted evaluation'):
+    with pytest.raises(RuntimeError, match='interrupted'):
         data_preparation.materialize_preparation(recipe.pk, 'first', artifact_root=root,
-                                                catalog=default_catalog())
+                                                catalog=default_catalog(), progress_callback=progress)
     result = data_preparation.materialize_preparation(recipe.pk, 'retry', artifact_root=root,
-                                                     catalog=default_catalog())
-    assert calls == [False, True, True]
+                                                     catalog=default_catalog(), progress_callback=progress)
+    assert calls == ([False, True, True] if interruption == 'evaluation' else [False, False, True])
+    assert sum(update.get('label', '') == 'Paso 1 de 2 completado: center'
+               for update in events) == 2  # once in training, once in evaluation
     assert result['frame_count'] == 3
 
 
