@@ -4328,3 +4328,24 @@ def test_progress_events_do_not_inherit_previous_component_duration():
                                       'component': 'Second', 'span_id': 'second', 'status': 'started'})
     job.refresh_from_db()
     assert 'duration_seconds' not in job.progress['trace'][-1]
+
+
+def test_worker_abort_records_failure_context_and_clears_live_batch_eta():
+    from storm_studio.management.commands.worker import record_worker_exit
+    from storm_studio.models import Job, Project, Revision, Study
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='GPU failure')
+    plan = Revision.objects.create(study=study, kind='plan', payload={})
+    job = Job.objects.create(revision=plan, status='running', progress={
+        'phase': 'training', 'label': 'Entrenando', 'stage_index': 3, 'stage_total': 5,
+        'epoch': 1, 'batch_step': 15, 'batch_total': 4325, 'batch_eta_seconds': 1247,
+        'throughput': 885.4, 'device': 'cuda'},
+        logs=[{'timestamp': '', 'message': 'HW Exception reason :GPU Hang'}])
+    record_worker_exit(job.pk, -6)
+    job.refresh_from_db()
+    assert job.status == 'failed'
+    assert job.progress['phase'] == 'failed'
+    assert job.progress['failure_context']['batch_step'] == 15
+    assert job.progress['failure_context']['signal'] == 'SIGABRT'
+    assert 'GPU Hang' in job.error
+    assert 'batch_eta_seconds' not in job.progress
+    assert 'batch_step' not in job.progress

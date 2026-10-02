@@ -30,6 +30,32 @@ def progress_heartbeat(progress, *, quiet_seconds):
             'No confirma avance del procesamiento.')
 
 
+def record_worker_exit(job_id, returncode):
+    """Persist fatal child failures that bypass Python exception handling."""
+    from storm_studio.services import _record_progress
+    job = Job.objects.get(pk=job_id)
+    if job.status not in {'pending', 'running'}:
+        return
+    previous = job.progress or {}
+    context = {key: previous[key] for key in (
+        'phase', 'epoch', 'batch_step', 'batch_total', 'checkpoint_epoch', 'device',
+        'component', 'operation') if key in previous}
+    context['exit_code'] = returncode
+    if returncode < 0:
+        try:
+            context['signal'] = signal.Signals(-returncode).name
+        except ValueError:
+            context['signal'] = str(-returncode)
+    gpu_hang = any('GPU Hang' in str(entry.get('message', '')) for entry in (job.logs or []))
+    error = (f'GPU Hang: el proceso de entrenamiento terminó con {context.get("signal", returncode)}.'
+             if gpu_hang else f'Worker process exited {returncode}')
+    _record_progress(job_id, {'phase': 'failed', 'label': error,
+                             'phase_step': None, 'phase_total': None, 'unit_label': None,
+                             'failure_context': context})
+    Job.objects.filter(pk=job_id, status__in=['pending', 'running']).update(
+        status='failed', error=error, finished=timezone.now())
+
+
 def process_identity(pid):
     stat_fields = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8').rsplit(')', 1)[1].split()
     return {
@@ -200,8 +226,7 @@ class Command(BaseCommand):
                         selector.close()
                         output.close()
                     if child.returncode and not stopping:
-                        Job.objects.filter(pk=job.pk, status__in=['pending', 'running']).update(
-                            status='failed', error=f'Worker process exited {child.returncode}', finished=timezone.now())
+                        record_worker_exit(job.pk, child.returncode)
                     child = None
                 if options['once']:
                     return
