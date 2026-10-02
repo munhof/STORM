@@ -4349,3 +4349,13 @@ def test_worker_abort_records_failure_context_and_clears_live_batch_eta():
     assert 'GPU Hang' in job.error
     assert 'batch_eta_seconds' not in job.progress
     assert 'batch_step' not in job.progress
+
+
+def test_gpu_hang_card_explains_retry_keeps_the_failed_backend(client):
+    from storm_studio.models import Job, Project, Revision, Study
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='GPU failure guidance')
+    revision = Revision.objects.create(study=study, kind='plan', payload={'model': 'vame_native', 'config': {'device': 'cuda'}})
+    Job.objects.create(revision=revision, status='failed', error='GPU Hang: SIGABRT')
+    response = client.get(f'/studies/{study.pk}/jobs/')
+    assert 'Reintentar conserva la configuración' in response.content.decode()
+    assert 'rnn_backend' in response.content.decode()
