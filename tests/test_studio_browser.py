@@ -243,6 +243,46 @@ def test_state_report_opens_colored_charts_and_raw_episode_table(live_server):
         page.get_by_text('Ver tabla de valores por episodio', exact=True).click()
         expect(page.locator('#state-bouts-table')).to_contain_text('Frame inicial')
         expect(page.locator('#state-bouts-table')).to_contain_text('mouse')
+        page.set_viewport_size({'width': 390, 'height': 844})
+        summary = page.get_by_text('Ver tabla de valores por episodio', exact=True)
+        summary.focus()
+        summary.press('Enter')
+        expect(page.locator('#state-bouts-table')).not_to_be_visible()
+        summary.press('Enter')
+        expect(page.locator('#state-bouts-table')).to_be_visible()
+        dimensions = page.evaluate('''() => ({
+            width: document.documentElement.scrollWidth, viewport: innerWidth
+        })''')
+        assert dimensions['width'] <= dimensions['viewport'], dimensions
+        browser.close()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_comparison_is_keyboard_operable_without_mobile_page_overflow(live_server):
+    from storm_studio.models import Job, Project, Revision, Study
+
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='Mobile comparison')
+    plan = Revision.objects.create(study=study, kind='plan', payload={'model': 'identity'})
+    for predictions in ([0, 1], [1, 0]):
+        Job.objects.create(revision=plan, status='completed', result={
+            'model': 'identity', 'partition': 'test', 'indices': [0, 1],
+            'predictions': predictions, 'metrics': {},
+        })
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={'width': 390, 'height': 844})
+        page.goto(f'{live_server.url}/studies/{study.pk}/compare/')
+        selector = page.get_by_label('Corridas completadas', exact=True)
+        selector.focus()
+        selector.press('Home')
+        selector.press('Shift+ArrowDown')
+        page.get_by_role('button', name='Comparar selección').focus()
+        page.get_by_role('button', name='Comparar selección').press('Enter')
+        expect(page.get_by_role('heading', name='Ejecuciones seleccionadas')).to_be_visible()
+        dimensions = page.evaluate('''() => ({
+            width: document.documentElement.scrollWidth, viewport: innerWidth
+        })''')
+        assert dimensions['width'] <= dimensions['viewport'], dimensions
         browser.close()
 
 
