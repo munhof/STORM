@@ -149,8 +149,14 @@ def test_run_endpoint_rejects_external_preparation_with_zero_jobs(client, monkey
     revision = Revision.objects.create(study=study, kind='plan', payload={
         'model': 'official', 'config': {}, 'steps': [{'type': 'scale', 'factor': 2}]})
     response = client.post(f'/plans/{revision.pk}/run/')
-    assert response.status_code == 400
-    assert b'external preparation' in response.content
+    assert response.status_code == 302
+    assert response.url == f'/studies/{study.pk}/flow/'
+    from django.contrib.messages import get_messages
+    diagnostics = [str(message) for message in get_messages(response.wsgi_request)]
+    assert any('external preparation' in message and 'Configurar' in message
+               for message in diagnostics)
+    revision.refresh_from_db()
+    assert revision.payload['steps'] == [{'type': 'scale', 'factor': 2}]
     assert not Job.objects.filter(revision__study=study).exists()
 
 

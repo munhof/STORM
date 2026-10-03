@@ -308,6 +308,9 @@ Cada rama recibe diagnóstico propio (`root` para la principal, nombre del model
 las adicionales). Los errores impiden crear jobs; las advertencias se muestran en
 formularios/ejecuciones y permanecen en `result.validation_problems`.
 PlanForm, submit, endpoint de ejecución y suite.execute usan la misma validación.
+Ante un plan inválido, el envío desde el navegador vuelve a Configurar y muestra
+el diagnóstico y la indicación de guardar un plan nuevo; conserva el plan original
+y crea cero jobs. Los clientes Python reciben `PlanValidationError`.
 
 `data_summary` es metadata proporcionada por un host confiable: `feature_names`,
 `shape` por observación, `input_type`, `full_sessions` y `preparation` opcionales.

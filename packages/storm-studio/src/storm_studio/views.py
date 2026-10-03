@@ -2184,7 +2184,12 @@ def run(request, revision_id):
             revision.payload, worker_catalog,
             services.plan_data_summary(revision.payload, worker_catalog))
     except ValueError as error:
-        return HttpResponse(str(error), status=400)
+        messages.error(
+            request,
+            f'No se inició la ejecución: {error}. '
+            'Revisá el modelo y sus pasos en Configurar y guardá un plan nuevo. '
+            'No se creó ninguna ejecución ni se modificó el plan guardado.')
+        return redirect('page', revision.study_id, 'flow')
     for problem in problems:
         if problem.severity == 'warning':
             messages.warning(request, f'{problem.branch}: {problem.message}')
