@@ -20,6 +20,16 @@ ALIGNED_FIELDS = (
 
 
 def resolve_preparation_steps(steps, feature_names):
+    """Compatibility bridge; scientific resolution belongs to the plugin."""
+    from storm_studio.services import catalog
+
+    resolver = catalog().preparation_resolver
+    if resolver is None:
+        return _legacy_resolve_preparation_steps(steps, feature_names)
+    return resolver(steps, feature_names)
+
+
+def _legacy_resolve_preparation_steps(steps, feature_names):
     """Resolve bodypart choices against the features available at each step."""
     current_features = list(feature_names or [])
     resolved = []
@@ -80,6 +90,7 @@ def _bodypart_pair(feature_names, bodypart):
     if any(name not in feature_names for name in names):
         raise ValueError(f'Body part {bodypart!r} is unavailable at this step.')
     return [feature_names.index(name) for name in names]
+
 
 
 def _step_versions(steps, catalog):

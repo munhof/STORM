@@ -2177,6 +2177,17 @@ def run(request, revision_id):
                 'required_model': model_name,
             }, doseq=True)
             return redirect(target)
+    from storm.contracts import require_valid_plan
+
+    try:
+        problems = require_valid_plan(
+            revision.payload, worker_catalog,
+            services.plan_data_summary(revision.payload, worker_catalog))
+    except ValueError as error:
+        return HttpResponse(str(error), status=400)
+    for problem in problems:
+        if problem.severity == 'warning':
+            messages.warning(request, f'{problem.branch}: {problem.message}')
     if request.POST.get('run_branches'):
         primary_model = revision.payload.get('model')
         try:

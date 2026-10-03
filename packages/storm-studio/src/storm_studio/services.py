@@ -47,6 +47,45 @@ def catalog():
     return result
 
 
+def plan_data_summary(payload, worker_catalog):
+    """Inspect metadata only; never load the dataset artifact during preflight."""
+    dataset_id = payload.get('dataset_revision_id')
+    if not dataset_id:
+        return None
+    dataset = DatasetRevision.objects.filter(pk=dataset_id).first()
+    if dataset is None:
+        return None
+    summary = dict(dataset.inventory)
+    preview = summary.get('preview') or []
+    if preview:
+        from storm.contracts import _shape
+        summary['shape'] = _shape(preview[0].get('features'))
+    if dataset.connector == 'prepared_artifact':
+        summary['full_sessions'] = False
+        recipe = Revision.objects.filter(
+            pk=dataset.config.get('preparation_revision_id'), kind='preparation').first()
+        source = DatasetRevision.objects.filter(
+            pk=dataset.config.get('source_dataset_revision_id')).first()
+        if (recipe is not None and source is not None and source.artifact_ref
+                and recipe.payload.get('dataset_revision_id') == source.pk
+                and source.dataset_id == dataset.dataset_id):
+            from storm.config import fingerprint
+            from storm_studio.data_preparation import _step_versions
+            resolver = worker_catalog.preparation_resolver
+            steps = recipe.payload.get('steps', [])
+            if resolver:
+                steps = resolver(steps, source.inventory.get('feature_names', []))
+            versions = _step_versions(steps, worker_catalog)
+            identity = fingerprint({'source': source.artifact_ref, 'steps': steps,
+                                    'step_versions': versions})
+            if (identity == dataset.config.get('preparation_fingerprint')
+                    and identity == dataset.inventory.get('source_fingerprint')
+                    and versions == dataset.config.get('step_versions')):
+                summary['preparation'] = {'validated': True, 'fingerprint': identity,
+                                          'resolved_steps': steps}
+    return summary
+
+
 def submit(revision, previous=None, operation=None, source=None):
     if revision.kind != 'plan':
         raise ValueError('Only plan revisions can execute')
@@ -56,6 +95,11 @@ def submit(revision, previous=None, operation=None, source=None):
         raise ValueError('Unknown operation')
     if revision.payload.get('label_correction_revision_id') and operation != 'train':
         raise ValueError('Label corrections can only be included in a new training plan.')
+    from storm.contracts import require_valid_plan
+
+    worker_catalog = catalog()
+    problems = require_valid_plan(revision.payload, worker_catalog,
+                       plan_data_summary(revision.payload, worker_catalog))
     dataset_revision_id = revision.payload.get('dataset_revision_id')
     if revision.payload.get('label_correction_revision_id') and dataset_revision_id is None:
         raise ValueError('Label corrections require a registered dataset source.')
@@ -94,7 +138,8 @@ def submit(revision, previous=None, operation=None, source=None):
                 raise ValueError('The inference plan must reuse the selected model')
         if operation == 'resume' and source.status in ('pending', 'running'):
             raise ValueError('Stop the source execution before resuming its checkpoint')
-    return Job.objects.create(revision=revision, previous=previous, source=source, operation=operation)
+    return Job.objects.create(revision=revision, previous=previous, source=source, operation=operation,
+                              result={'validation_problems': [p.to_dict() for p in problems]})
 
 
 @transaction.atomic
@@ -349,6 +394,7 @@ def perform(job_id):
                 options['resume_config'] = job.source.revision.payload.get('config', {})
             worker_catalog = catalog()
             spec = deepcopy(job.revision.payload)
+            spec['data_summary'] = plan_data_summary(spec, worker_catalog)
             progress_callback = lambda update: _record_progress(job_id, update)
             dataset_revision_id = spec.get('dataset_revision_id')
             if (spec.get('label_correction_revision_id') is not None

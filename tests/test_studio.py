@@ -560,7 +560,22 @@ def test_saved_model_runs_on_a_registered_dataset_revision(client, settings, tmp
     assert inference_job.result['source_execution'] == training_job.result['execution_id']
 
 
-def test_saved_model_apply_reuses_the_resolved_preparation_steps(client):
+def test_saved_model_apply_reuses_the_resolved_preparation_steps(client, monkeypatch):
+    from storm.suite import Component, default_catalog
+    from storm_studio import services
+    from storm.pipeline import PipelineStep
+
+    class Recenter(PipelineStep):
+        step_type = 'pose.recenter'
+        def __init__(self, **config):
+            pass
+        def process(self, context):
+            return context
+
+    worker_catalog = default_catalog()
+    worker_catalog.register(Component('vame_native', lambda config: None, ('infer',), {}))
+    worker_catalog.steps.register(Recenter)
+    monkeypatch.setattr(services, 'catalog', lambda: worker_catalog)
     from storm_studio.models import Dataset, DatasetRevision, Job, Project, Study, Revision
 
     dataset = Dataset.objects.create(name='DLC sessions')
@@ -648,7 +663,18 @@ def test_worker_resolves_pose_steps_from_registered_inventory_features(monkeypat
         'connector': 'dlc_h5', 'dataset_revision_id': source.pk,
         'preparation_revision_id': preparation.pk, 'steps': steps, 'data': {},
     })
-    monkeypatch.setattr(services, 'catalog', default_catalog)
+    from storm.pipeline import PipelineStep
+    class Recenter(PipelineStep):
+        step_type = 'pose.recenter'
+        def __init__(self, **config):
+            pass
+        def process(self, context):
+            return context
+    worker_catalog = default_catalog()
+    worker_catalog.steps.register(Recenter)
+    from storm_studio.data_preparation import _legacy_resolve_preparation_steps
+    worker_catalog.preparation_resolver = _legacy_resolve_preparation_steps
+    monkeypatch.setattr(services, 'catalog', lambda: worker_catalog)
     monkeypatch.setattr(dataset_inventory, 'connector_input',
                         lambda *_args, **_kwargs: {'pose_paths': ['pose.h5']})
     monkeypatch.setattr(services, 'execute', lambda spec, *_args, **_kwargs: {'spec': spec})
@@ -2156,7 +2182,12 @@ def test_csrf_and_failed_execution(client, settings, tmp_path):
     settings.ARTIFACT_ROOT = tmp_path
     assert Client(enforce_csrf_checks=True).post('/', {'name': 'X'}).status_code == 403
     study = Study.objects.create(project=Project.objects.create(name='P'), name='S')
-    job = submit(Revision.objects.create(study=study, kind='plan', payload={'model': 'missing'}))
+    revision = Revision.objects.create(study=study, kind='plan', payload={'model': 'missing'})
+    with pytest.raises(ValueError, match='registered model'):
+        submit(revision)
+    # A persisted legacy job still encounters the worker's second barrier.
+    from storm_studio.models import Job
+    job = Job.objects.create(revision=revision)
     perform(str(job.pk))
     job.refresh_from_db()
     assert job.status == 'failed'

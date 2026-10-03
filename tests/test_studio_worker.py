@@ -48,13 +48,13 @@ def test_worker_persists_stage_and_error_output_in_job_logs(tmp_path):
     run('-m', 'django', 'migrate', '--noinput')
     run('-m', 'django', 'demo')
     created = run('-c',
-        'import django; django.setup(); from storm_studio.models import Study, Revision; '
+        'import django; django.setup(); from storm_studio.models import Study, Revision, Job; '
         'from storm_studio.services import submit; '
         'study=Study.objects.first(); '
         'revision=Revision.objects.create(study=study, kind="plan", payload={'
         '"model":"missing_model_for_log_test", "config":{}, "steps":[], '
         '"data":{"inputs":[1,2], "train":[0], "test":[1]}}); '
-        'print(submit(revision).pk)')
+        'print(Job.objects.create(revision=revision).pk)')
     job_id = created.stdout.strip()
 
     run('-m', 'django', 'worker', '--once')

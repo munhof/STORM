@@ -339,23 +339,22 @@ class PlanForm(forms.Form):
             if not isinstance(branch_configs, dict):
                 raise forms.ValidationError('La configuración de las ramas debe ser un objeto.')
             result['branch_configs'] = {
-                name: catalog().normalize(name, branch_configs.get(name, {}))
+                name: branch_configs.get(name, {})
                 for name in result.get('branch_models', [])
             }
-        try:
-            if 'model' in result and 'config' in result:
-                result['config'] = catalog().normalize(result['model'], result['config'])
-            if 'steps' in result:
-                if not isinstance(result['steps'], list):
-                    raise ValueError('Steps must be a list')
-                available = catalog().steps.available
-                for step in result['steps']:
-                    if not isinstance(step, dict) or step.get('type') not in (*available, 'center'):
-                        raise ValueError('Unknown preparation step')
-                    if step['type'] == 'scale':
-                        from math import isfinite
-                        if not isfinite(float(step['factor'])):
-                            raise ValueError('Scale must be finite')
-        except (ValueError, KeyError, TypeError) as error:
-            raise forms.ValidationError(str(error))
+        from storm.contracts import validate_plan
+        from storm_studio.services import plan_data_summary
+
+        worker_catalog = catalog()
+        self.validation_problems = validate_plan(
+            result, worker_catalog, plan_data_summary(result, worker_catalog))
+        for problem in self.validation_problems:
+            if problem.severity == 'error':
+                self.add_error(None, f'{problem.branch}: {problem.message}')
+        if not any(p.severity == 'error' for p in self.validation_problems):
+            if result.get('model'):
+                result['config'] = worker_catalog.normalize(result['model'], result.get('config', {}))
+            result['branch_configs'] = {
+                name: worker_catalog.normalize(name, result.get('branch_configs', {}).get(name, {}))
+                for name in result.get('branch_models', [])}
         return result

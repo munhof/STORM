@@ -3,12 +3,13 @@
 The original Study API remains supported. These services introduce explicitly
 partitioned execution and capability-based model construction.
 """
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from copy import deepcopy
 from math import isfinite
 import random
 from typing import Callable
 
+from storm.contracts import ModelInputContract, _materialized_steps, require_valid_plan
 from storm.artifacts import ArtifactRef, FileArtifactStore
 from storm.config import fingerprint, json_compatible
 from storm.models import ModelOutput
@@ -30,6 +31,7 @@ class Component:
     capabilities: tuple[str, ...]
     schema: dict
     version: str = '1'
+    input_contract: ModelInputContract | None = None
 
 
 class Catalog:
@@ -43,6 +45,7 @@ class Catalog:
             'json_records': lambda data: data,
             'prepared_artifact': lambda data: data,
         }
+        self.preparation_resolver = None
         self.seeders = []
         self.recipe_presets = {}
         self.dataset_presets = {}
@@ -74,7 +77,8 @@ class Catalog:
 
     def describe(self):
         return [{'name': c.name, 'version': c.version, 'capabilities': c.capabilities,
-                 'schema': c.schema} for c in self._components.values()]
+                 'schema': c.schema, 'input_contract': (asdict(c.input_contract)
+                     if c.input_contract is not None else None)} for c in self._components.values()]
 
     def validate(self, name, config):
         self.normalize(name, config)
@@ -457,7 +461,9 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
 def missing_required_pipeline_steps(model_name, steps, catalog=None):
     """Return adapter-declared preparation steps that are absent from a plan."""
     catalog = catalog or default_catalog()
-    required = getattr(catalog.get(model_name).builder, 'required_pipeline_steps', ())
+    component = catalog.get(model_name)
+    required = (component.input_contract.required_steps if component.input_contract
+                else getattr(component.builder, 'required_pipeline_steps', ()))
     configured = {
         step.get('type') for step in steps
         if isinstance(step, dict) and isinstance(step.get('type'), str)
@@ -490,6 +496,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
     report_progress('loading', 'Cargando y validando los datos', 1)
     spec = json_compatible(spec)
     catalog = catalog or default_catalog()
+    validation_problems = require_valid_plan(spec, catalog, spec.get('data_summary'))
     descriptor = catalog.get(spec['model'])
     preapplied_steps = spec.get('preapplied_steps', [])
     if (not isinstance(preapplied_steps, list)
@@ -497,7 +504,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
             or len(preapplied_steps) != len(set(preapplied_steps))):
         raise ValueError('preapplied_steps must be a unique list of nonempty step types')
     steps_for_validation = list(spec.get('steps', [])) + [
-        {'type': step} for step in preapplied_steps]
+        {'type': step} for step in preapplied_steps] + _materialized_steps(spec.get('data_summary'))
     missing_steps = missing_required_pipeline_steps(
         spec['model'], steps_for_validation, catalog)
     if missing_steps:
@@ -908,7 +915,8 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
     report_progress(
         'saving', 'Resultados guardados', artifact_stage,
         phase_step=artifact_total, phase_total=artifact_total, unit_label='artefactos')
-    result = {'execution_id': execution_id, 'model': spec['model'], 'model_version': descriptor.version,
+    result = {'validation_problems': [p.to_dict() for p in validation_problems],
+              'execution_id': execution_id, 'model': spec['model'], 'model_version': descriptor.version,
               'capabilities': list(descriptor.capabilities), 'model_ref': reference.to_dict(),
               'output_ref': output_ref.to_dict(), 'spec': spec, 'fingerprint': fingerprint(spec),
               'data_fingerprint': data_fingerprint, 'resolved_data': data, 'indices': selected,
