@@ -271,3 +271,39 @@ PlanForm y submit usan [validate_plan](../api/interfaces.md); los errores bloque
 por rama y las advertencias quedan visibles. Consultar el catálogo no construye modelos.
 Hosts genéricos para controles/renderers y editor gráfico siguen propuestos en el
 [plan vigente](../planning/suite-completion.md).
+
+
+## Extensiones instaladas y reflexión (2026-10-03)
+
+Instalar un paquete Python de plugin y habilitar su módulo `register(catalog)`
+en `STORM_PLUGINS` en Studio y en el worker. Importar únicamente esos módulos
+explícitos; no usar el descubrimiento recursivo sobre un paquete con runtimes
+PyTorch/JAX. El builder debe importar las dependencias científicas al ejecutarse:
+
+```python
+from storm.suite import Component
+from storm.contracts import ModelInputContract
+
+def build(config):
+    from my_plugin.runtime import MyModel
+    return MyModel(config)
+
+def register(catalog):
+    catalog.register(Component('my_model', build, ('group', 'infer'),
+        {'type': 'object', 'properties': {'states': {'type': 'integer', 'minimum': 2}}},
+        input_contract=ModelInputContract(input_type='my_declared_input', preparation='external'),
+        descriptor={'version': '1', 'backend': 'my_backend',
+                    'source_modules': ['my_plugin.runtime'], 'dependencies': ['my-backend']}))
+```
+
+`reflect_schema` puede generar parámetros a partir de firmas/dataclasses. El
+plugin declara por separado la preparación, granularidad, puertos, dimensiones y
+restricciones cruzadas. Instalar una arquitectura nueva como componente distinto
+preserva su identidad y evita atribuir equivalencia científica al backend original.
+Studio no acepta código fuente para ejecutarlo en el servidor.
+
+El host gráfico consume `Component.descriptor.graph`: `field`, `default`, `nodes`
+y `slots`. El plugin aporta el compilador y `config_validator`; la UI sólo edita
+la configuración declarada. El primer caso ejecutable es el VAE de RAINSTORM con
+encoder GRU/LSTM. El editor general de pipeline, topologías arbitrarias y hosts
+científicos adicionales siguen abiertos en ST-08/09/10 y RS-10/11.

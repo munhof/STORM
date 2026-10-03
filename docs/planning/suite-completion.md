@@ -272,3 +272,27 @@ La copia aislada del contenido exacto publicado, sin cambios locales previos,
 pasó 256 pruebas de STORM (excluye tests de navegador). El workspace conserva
 la regresión local de retención que motivó ST-05; no se incluye en estos commits.
 STORM contratos: `e08b9a4059e22191ed4dbfb6f31d9897a5368e05`.
+
+
+## Entrega de configuración reflectable — 2026-10-03
+
+- ST-02: las variantes de ejecución ya no heredan ramas ni desplazan el plan editable.
+  El historial previo se conserva y se reconoce mediante sus relaciones originales.
+- ST-03: `branch_overrides` permite datos/pasos y referencias de preparación propios.
+  Las referencias se resuelven por estudio; preflight usa metadata por rama y no
+  crea jobs si alguna de las ramas a ejecutar falla.
+- ST-08/09: implementados descriptores, validación anidada, grafos tipados y host
+  inicial de configuración de nodos con controles accesibles. El editor general
+  de pipelines y topologías arbitrarias permanece pendiente.
+- RS-07/11: VAME expone arquitectura/optimizador/discretizador nativos, encoder
+  GRU/LSTM mediante grafo y controles oficiales por etapa. Proyectos oficiales
+  usan identidades únicas; se verificó la API instalada 0.14.4 (split mode_1/mode_2).
+- [RS-12](https://github.com/munhof/RAINSTORM/issues/13): KPMS nativo portado y fixture CPU;
+  algoritmo declarado explícitamente como PCA + AR-HMM mínimo.
+- [RS-13](https://github.com/munhof/RAINSTORM/issues/14): KPMS oficial 0.6.8, PCA real antes
+  de init, fases AR/full, inferencia alineada y entorno aislado con lock.
+
+Se realizaron sólo fixtures CPU pequeñas y mocks, sin entrenar estudios históricos,
+modificar sus revisiones ni reiniciar workers activos. El GPU Hang sigue en RS-08;
+reconstrucción, comparación, dashboards y aceptación científica permanecen abiertos.
+Los issues no se cierran por esta evidencia parcial.

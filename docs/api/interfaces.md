@@ -335,3 +335,47 @@ advertencias incluyen `input.unknown`, `input.shape_unknown`,
 Este contrato no implementa datasets por rama, puertos gráficos, controles científicos
 ni equivalencia con Tesis_Facu; esas extensiones permanecen propuestas en el
 [plan vigente](../planning/suite-completion.md).
+## Descriptores reflectables y grafos (2026-10-03)
+
+`storm.descriptors.reflect_schema` describe firmas anotadas y dataclasses sin
+instanciar modelos. Los parámetros variádicos, anotaciones no soportadas y
+restricciones científicas requieren un esquema declarado. Un esquema Pydantic
+exportado puede aportar evidencia; no se convierte automáticamente en un
+contrato compatible con el subconjunto JSON Schema de STORM.
+
+`Component` agrega al final `descriptor` y `config_validator`. El validador debe
+ser puro y liviano: recibe configuración normalizada, devuelve `None` o levanta
+`ValueError`. `Catalog.normalize` valida objetos anidados, elementos de arrays,
+defaults independientes y restricciones cruzadas declaradas por el plugin.
+`Catalog.describe` exporta descriptores y fingerprints sin construir modelos.
+
+`storm.graphs.validate_graph(graph, descriptors)` verifica nodos registrados,
+configuración, puertos tipados, conexiones únicas y ausencia de ciclos.
+`ordered_nodes` devuelve un orden topológico. La ejecución y las dimensiones
+dinámicas pertenecen al compilador del plugin; un grafo válido estructuralmente
+no demuestra equivalencia científica ni habilita una topología arbitraria.
+
+`storm.plans.branch_specs` devuelve copias independientes del plan principal y
+sus ramas. `branch_overrides[modelo]` admite `data`, `connector`,
+`dataset_revision_id`, `preparation_revision_id` y `steps`. Cada variante elimina
+las listas de ramas heredadas. Studio resuelve las referencias de preparación
+contra revisiones del mismo estudio y crea variantes marcadas
+`execution_variant: true`; las revisiones editables quedan fuera de esa selección.
+Las revisiones históricas siguen siendo legibles y no se reescriben.
+
+Las corridas `suite.execute` guardan `configuration.requested`,
+`configuration.normalized` y `component_snapshot` con descriptor, contrato,
+identidad del builder, SHA256 de su módulo y versiones de dependencias declaradas.
+Estas capacidades corresponden al runtime `suite`, no a `Study/RunEngine`.
+
+Los nuevos checkpoints incluyen `component_identity`: descriptor, esquema,
+builder y hashes de módulos declarados. Cambiar esa identidad impide continuar
+el checkpoint aunque el número de versión sea igual. Las versiones del runtime
+siguen registradas separadamente; la compatibilidad de dispositivos la valida
+el adapter. Los checkpoints antiguos conservan sus comprobaciones anteriores y
+no reciben garantías nuevas de continuidad por esta ampliación.
+
+El método optativo `model.configuration_snapshot()` devuelve un objeto JSON con
+la configuración resuelta por el adapter. `suite.execute` lo guarda como
+`configuration.resolved`; los plugins antiguos guardan `None`. STORM no extrae
+atributos internos por reflexión para inventar esa configuración.
