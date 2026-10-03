@@ -263,3 +263,11 @@ crea una nueva revisión con diff y fingerprint.
 Esta tabla es la frontera de implementación. La UI puede anticipar controles
 para capacidades futuras, pero debe deshabilitarlos con una explicación concreta
 hasta que exista el contrato correspondiente.
+
+## Contratos de entrada antes de crear jobs
+
+`Catalog.describe()` incluye `input_contract`, serializable y opcional.
+PlanForm y submit usan [validate_plan](../api/interfaces.md); los errores bloquean jobs
+por rama y las advertencias quedan visibles. Consultar el catálogo no construye modelos.
+Hosts genéricos para controles/renderers y editor gráfico siguen propuestos en el
+[plan vigente](../planning/suite-completion.md).

@@ -287,3 +287,13 @@ de dataset con su propio artefacto, fingerprint y enlace a la fuente. En
 **Configurar**, el investigador puede seleccionar ese dataset procesado, o
 aplicar una receta guardada durante la ejecución del modelo. La revisión del
 plan conserva el ID de la receta y los pasos resueltos que ejecutó el worker.
+
+## Resolución y validación previa
+
+`Catalog.preparation_resolver` acepta un `PreparationResolver` del plugin;
+RAINSTORM resuelve nombres de pose preservando config/índices sin mutar la receta.
+Studio conserva su función pública como puente y un fallback legacy temporal.
+La migración completa de controles/previews sigue propuesta. `validate_plan`
+comprueba pasos por rama antes del envío; pasos materializados requieren procedencia
+validada y no una lista de nombres declarada por el cliente.
+[Formato y límites](../api/interfaces.md).

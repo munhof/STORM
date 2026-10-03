@@ -403,3 +403,14 @@ Resuelve la implementación configurada, la ejecuta y valida el tipo de salida.
 
 La versión del paquete se expone como `storm.__version__`. El corte actual es
 pre-alpha y todavía puede introducir cambios incompatibles.
+
+## Runtime `suite` y contratos de entrada
+
+La API `Study`/`RunEngine` documentada arriba ejecuta specs de estudios y corridas.
+El runtime `storm.suite` usa planes de aplicación con particiones explícitas y
+capacidades `train`, `infer`, `group`, `update` y `checkpoint`. Sus servicios
+`execute`, `infer` y `evaluate` y la inferencia de modelos guardados en Studio
+no deben atribuirse automáticamente a `Study`/`RunEngine`.
+
+`storm.contracts.validate_plan` valida planes de `suite` antes de construir modelos.
+Los protocolos, formatos y límites están en [interfaces](interfaces.md).

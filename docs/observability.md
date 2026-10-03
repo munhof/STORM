@@ -27,3 +27,10 @@ by this observer. This is a local event contract, not an OpenTelemetry exporter.
 
 Running workers must load the new code to produce these events; updating source files
 does not modify an already running Python process. Schedule worker reload between jobs.
+
+## Progress protocol and checkpoints
+
+`storm.contracts.ProgressReporter` documents the existing optional callback capability;
+`ExecutionObserver.bind` and `storm.learning` checkpoint interfaces remain compatible.
+It adds no new heartbeat or ETA semantics. Phase/batch/session normalization and
+historical checkpoint retention remain pending in the [current plan](planning/suite-completion.md).

@@ -23,6 +23,7 @@ nav:
       - Estudio visual y asistencia: design/visual-study.md
       - Plan vigente de cierre: planning/suite-completion.md
       - Plan histórico: planning/studio-roadmap.md
+  - Observabilidad: observability.md
   - Guías:
       - Estudios y corridas: guides/studies-and-runs.md
       - Modelos compatibles: guides/models.md

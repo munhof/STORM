@@ -159,3 +159,11 @@ implementa todavía un catálogo de estudios ni una operación `list_runs()`.
 - No hay estrategias grid/random incorporadas.
 - `StudySpec` no tiene aún versión de schema explícita.
 
+
+## Planes del runtime `suite`
+
+`StudySpec`/`RunSpec` pertenecen a `Study`/`RunEngine`; el plan de Studio pertenece
+a `suite`. `storm.contracts.validate_plan` valida configuración y preparación por
+rama antes de encolar. La preparación/dataset propios por rama y la separación del
+plan activo de variantes son trabajo pendiente del [plan vigente](../planning/suite-completion.md).
+La primera entrega no modifica la revisión 71 ni corridas 72–75 del estudio diagnosticado.

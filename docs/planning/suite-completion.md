@@ -217,3 +217,53 @@ ejemplo genérico reproducible y limitaciones explícitas. Los cambios de esquem
 incluyen migración y lectura de fixtures anteriores. Los cambios de UI incluyen
 prueba de navegador. La documentación se valida con MkDocs estricto y enlaces
 internos. Ninguna entrega necesita importar una aplicación de dominio.
+
+## Seguimiento vigente STORM + RAINSTORM (2026-10-02)
+
+Las etapas E1–E10 anteriores conservan sus objetivos. El seguimiento ejecutable
+se concentra en los siguientes issues; no se crea un roadmap independiente.
+Épicas relacionadas: [STORM](https://github.com/munhof/STORM/issues/1) y [RAINSTORM](https://github.com/munhof/RAINSTORM/issues/1).
+
+[Diagnóstico fechado](https://github.com/munhof/RAINSTORM/blob/contracts-backlog-20261002/docs/plans/01_diagnostico_estudios_20261002T220735.md) y [propuesta detallada de origen](https://github.com/munhof/RAINSTORM/blob/contracts-backlog-20261002/docs/plans/02_plan_backlog_estudios_20261002T220735.md).
+
+| ID | Prioridad | Issue definitivo | Estado de esta entrega |
+|---|---|---|---|
+| ST-01 | P0 | [Implementar contratos de entrada y validación compartida antes de encolar](https://github.com/munhof/STORM/issues/2) | Implementado con regresiones; issue abierto para revisión |
+| ST-02 | P0 | [Separar plan activo de variantes de ejecución y evitar ramas heredadas](https://github.com/munhof/STORM/issues/3) | Pendiente |
+| ST-03 | P0 | [Permitir dataset y preparación propios por rama](https://github.com/munhof/STORM/issues/4) | Pendiente |
+| ST-04 | P1 | [Reutilizar preparación compatible y mostrar motivos de cache hit/miss](https://github.com/munhof/STORM/issues/5) | Pendiente |
+| ST-05 | P1 | [Retener checkpoints históricos y validar continuidad](https://github.com/munhof/STORM/issues/6) | Pendiente |
+| ST-06 | P1 | [Normalizar avance por fase, lote y sesión; separar heartbeat de progreso](https://github.com/munhof/STORM/issues/7) | Pendiente |
+| ST-07 | P1 | [Validar tareas, métricas y compatibilidad antes de comparar](https://github.com/munhof/STORM/issues/8) | Pendiente |
+| ST-08 | P2 | [Extender catálogo y hosts de UI mediante descriptores de plugins](https://github.com/munhof/STORM/issues/9) | Pendiente |
+| ST-09 | P2 | [Editor gráfico con validación, teclado y equivalencia con especificaciones Python](https://github.com/munhof/STORM/issues/10) | Pendiente |
+| ST-10 | P2 | [SDK de extensiones y publicación opcional de código en workers aislados](https://github.com/munhof/STORM/issues/11) | Pendiente |
+| ST-11 | P3 | [Dashboards con gráficos, tablas y evidencia sincronizada](https://github.com/munhof/STORM/issues/12) | Pendiente |
+| ST-12 | P3 | [Exportación, restauración y aceptación desde instalación limpia](https://github.com/munhof/STORM/issues/13) | Pendiente |
+
+
+ST-01 y RS-01 se implementan juntos. ST-03 depende de ST-01/ST-02; RS-04 y RS-05
+preceden RS-06 y RS-09. RS-07 depende de ST-03. ST-08 y RS-10 preceden ST-09;
+ST-11 depende de alineación y comparación verificadas. GPU Hang se trata por
+RS-08 independientemente del preprocesado. Dependencias detalladas y aceptación
+están en cada issue.
+
+La primera entrega implementa contratos y preflight; reconstrucción científica,
+plan activo/variantes, inputs por rama, editor gráfico y dashboards permanecen
+pendientes. No se modifican revisiones históricas ni se inician entrenamientos.
+
+### Verificación de la primera entrega
+
+Pruebas escritas antes de implementación y comprobadas fallidas por interfaces
+faltantes; la regresión adicional del endpoint reprodujo HTTP 500 antes de su fix.
+13 pruebas nuevas de STORM y 2 de RAINSTORM cubren diagnóstico por rama, cero jobs,
+proveniencia materializada, shapes, plugins numéricos, imports lazy y callbacks.
+La suite STORM (sin navegador) reportó 255 aprobadas y 1 fallo previo de retención;
+el mismo fallo fue reproducido con suite.py de HEAD previo en una copia aislada.
+Se mantiene en [ST-05](https://github.com/munhof/STORM/issues/6). La suite dirigida RAINSTORM reportó 58 aprobadas y 17 omitidas
+por runtimes opcionales; no se realizaron entrenamientos ni pruebas GPU.
+
+MkDocs estricto y comprobación de enlaces/diffs forman parte de la publicación.
+El [protocolo compartido](https://github.com/munhof/STORM/blob/contracts-backlog-20261002/CONTRIBUTING.md)
+exige reproducir, comprobar test fallido, cambio mínimo, regresión, contrato/guía/evidencia
+y cierre sólo con aceptación. Roadmaps anteriores permanecen históricos.

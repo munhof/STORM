@@ -273,3 +273,62 @@ Los resultados de `storm.suite.execute` incluyen `alignment`, con los IDs de
 observación originales y los índices que corresponden a las predicciones
 devueltas. Si el dataset no declara `observation_ids`, el motor genera IDs
 basados en su posición. Los IDs declarados deben ser strings no vacíos y únicos.
+
+## Preflight de planes `suite` (contrato v1, implementado)
+
+`storm.contracts` no importa Django ni librerías científicas. Exporta:
+
+- `ModelInputContract(version, input_type, preparation, required_steps, granularity, shape)`:
+  preparación `external`, `internal` o `unknown`; granularidad `observation` o `session`.
+- `ValidationProblem(code, severity, branch, component, field, message)`, con `to_dict()`.
+- `PreparationResolver`: callable `(steps, feature_names) -> resolved_steps`, sin mutar entradas.
+- `ProgressReporter`: `set_progress_callback(callback | None)`, compatible con `ExecutionObserver`.
+- `validate_plan(spec, catalog, data_summary=None)` y `require_valid_plan(...)`;
+  este último lanza `PlanValidationError` con `.problems` cuando hay errores.
+
+`Component.input_contract` es opcional y está al final del constructor. `Catalog.describe()`
+serializa el contrato sin construir modelos. Componentes antiguos declaran requisitos
+científicos desconocidos: advertencia `input.unknown`; preflight no inspecciona builders.
+El worker conserva comprobaciones legacy de ejecución como segunda barrera.
+
+```python
+from storm.contracts import ModelInputContract, validate_plan
+from storm.suite import Component, default_catalog
+
+catalog = default_catalog()
+catalog.register(Component("temporal", lambda config: None, (), {},
+    input_contract=ModelInputContract(input_type="temporal", preparation="external",
+                                     required_steps=("scale",))))
+problems = validate_plan({"model": "temporal", "steps": []}, catalog)
+assert problems[0].code == "preparation.required_step"
+```
+
+El spec de `suite` usa `model`, `config`, `steps`, `branch_models` y `branch_configs`.
+Cada rama recibe diagnóstico propio (`root` para la principal, nombre del modelo para
+las adicionales). Los errores impiden crear jobs; las advertencias se muestran en
+formularios/ejecuciones y permanecen en `result.validation_problems`.
+PlanForm, submit, endpoint de ejecución y suite.execute usan la misma validación.
+
+`data_summary` es metadata proporcionada por un host confiable: `feature_names`,
+`shape` por observación, `input_type`, `full_sessions` y `preparation` opcionales.
+No carga datasets ni instancia modelos; puede construir pasos con configuración
+resuelta para comprobar sus parámetros. Con schema ausente, advierte y verifica
+el registro de pasos. Con transformaciones arbitrarias no infiere shape de salida.
+Campos científicos desconocidos requieren comprobación del worker.
+
+Para pasos materializados, `preparation` debe contener `validated=True`, fingerprint
+SHA-256 completo y `resolved_steps`. El host verifica la identidad; esos campos no son
+una prueba criptográfica por sí solos. Studio recalcula fingerprint de fuente,
+configuración resuelta y versiones y lo compara con config e inventario. Una lista
+`preapplied_steps` aislada no satisface requisitos en preflight. Planes anteriores se
+leen sin migración; para ejecutar inputs ya preparados requieren metadata verificada.
+
+Códigos estables principales: `config.invalid`, `component.unknown`,
+`preparation.external_forbidden`, `preparation.required_step`, `preparation.invalid`,
+`preparation.resolve`, `input.shape`, `input.type`, `input.full_sessions`; las
+advertencias incluyen `input.unknown`, `input.shape_unknown`,
+`input.sessions_unknown` y `preparation.schema_unknown`.
+
+Este contrato no implementa datasets por rama, puertos gráficos, controles científicos
+ni equivalencia con Tesis_Facu; esas extensiones permanecen propuestas en el
+[plan vigente](../planning/suite-completion.md).

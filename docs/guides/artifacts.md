@@ -164,3 +164,16 @@ backend.
 - `RunRecord` se persiste como objeto Python;
 - no existe migración automática de schema.
 
+
+## Checkpoints y procedencia del runtime `suite`
+
+`RunEngine` persiste corridas de `Study`; `suite.execute` ofrece checkpoints con
+los contratos de `storm.learning` y recuperación de modelos guardados. Las APIs
+son distintas. La primera entrega de contratos conserva los métodos de checkpoints
+existentes: no implementa retención histórica ni continuidad científica completa.
+El fallo de retención de `progress-run-epoch-1` está registrado en el
+[plan vigente](../planning/suite-completion.md).
+
+Preflight reconoce preparación materializada sólo cuando el host verifica fuente,
+config resuelta, versiones y fingerprint contra el inventario. Integridad del artefacto
+se vuelve a comprobar al cargarlo; esta metadata no sustituye equivalencia científica.

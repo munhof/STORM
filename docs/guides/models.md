@@ -207,3 +207,11 @@ mediante un `fit()` vacío sin documentar esa decisión en la aplicación.
 - [ ] modelo y output se pueden persistir y recargar.
 - [ ] la integración declara dependencias y licencias opcionales.
 - [ ] hay tests de paridad con la API nativa de la biblioteca.
+
+## Declaración de entradas en `suite`
+
+La interfaz mínima anterior corresponde a `Study`/`RunEngine`. En `suite`, las
+capacidades registradas determinan métodos como `fit_predict`, `partial_fit` o
+`fit_with_checkpoints`; un adapter de inferencia puede declarar sólo `infer`.
+`Component.input_contract` declara preparación, pasos, granularidad y shape.
+Véase [contratos v1](../api/interfaces.md). Desconocido no significa científicamente compatible.
