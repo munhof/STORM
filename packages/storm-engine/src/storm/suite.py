@@ -32,6 +32,8 @@ class Component:
     schema: dict
     version: str = '1'
     input_contract: ModelInputContract | None = None
+    descriptor: dict | None = None
+    config_validator: Callable | None = None
 
 
 class Catalog:
@@ -77,7 +79,10 @@ class Catalog:
 
     def describe(self):
         return [{'name': c.name, 'version': c.version, 'capabilities': c.capabilities,
-                 'schema': c.schema, 'input_contract': (asdict(c.input_contract)
+                 'schema': deepcopy(c.schema), 'descriptor': deepcopy(c.descriptor),
+                 'descriptor_fingerprint': fingerprint({'schema': c.schema, 'descriptor': c.descriptor,
+                     'version': c.version, 'input_contract': asdict(c.input_contract) if c.input_contract else None}),
+                 'input_contract': (asdict(c.input_contract)
                      if c.input_contract is not None else None)} for c in self._components.values()]
 
     def validate(self, name, config):
@@ -113,18 +118,21 @@ class Catalog:
             raise ValueError('unsupported schema keyword: additionalProperties must be false')
         if set(config) - set(properties):
             raise ValueError('Unknown configuration fields')
-        normalized = dict(config)
+        normalized = deepcopy(config)
         for key, descriptor in properties.items():
             if 'default' in descriptor and key not in normalized:
-                normalized[key] = descriptor['default']
+                normalized[key] = deepcopy(descriptor['default'])
             if key not in normalized:
                 continue
-            self._validate_value(key, normalized[key], descriptor)
+            normalized[key] = self._validate_value(key, normalized[key], descriptor)
+        if component.config_validator is not None:
+            component.config_validator(normalized)
         return normalized
 
     @staticmethod
     def _validate_value(key, value, descriptor):
-        supported = {'type', 'default', 'enum', 'minimum', 'maximum', 'description'}
+        supported = {'type', 'default', 'enum', 'minimum', 'maximum', 'description',
+                     'properties', 'required', 'additionalProperties', 'items', 'minItems', 'maxItems'}
         if set(descriptor) - supported:
             raise ValueError(f'unsupported schema keyword for {key}')
         if 'description' in descriptor and not isinstance(descriptor['description'], str):
@@ -148,6 +156,30 @@ class Catalog:
             raise ValueError(f'{key} is below minimum')
         if 'maximum' in descriptor and value > descriptor['maximum']:
             raise ValueError(f'{key} is above maximum')
+        if kind == 'array':
+            if len(value) < descriptor.get('minItems', 0):
+                raise ValueError(f'{key} has too few items')
+            if 'maxItems' in descriptor and len(value) > descriptor['maxItems']:
+                raise ValueError(f'{key} has too many items')
+            if 'items' in descriptor:
+                value = [Catalog._validate_value(f'{key}[{index}]', item, descriptor['items'])
+                         for index, item in enumerate(value)]
+        if kind == 'object' and 'properties' in descriptor:
+            properties = descriptor['properties']
+            if descriptor.get('additionalProperties', False) is not False:
+                raise ValueError(f'unsupported schema keyword for {key}: additionalProperties')
+            if set(value) - set(properties):
+                raise ValueError(f'{key} has unknown configuration fields')
+            value = deepcopy(value)
+            for child, child_schema in properties.items():
+                if child not in value and 'default' in child_schema:
+                    value[child] = deepcopy(child_schema['default'])
+                if child not in value:
+                    if child in descriptor.get('required', []):
+                        raise ValueError(f'{key}.{child} is required')
+                    continue
+                value[child] = Catalog._validate_value(f'{key}.{child}', value[child], child_schema)
+        return value
 
     def build(self, name, config):
         component = self.get(name)
@@ -498,6 +530,8 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
     catalog = catalog or default_catalog()
     validation_problems = require_valid_plan(spec, catalog, spec.get('data_summary'))
     descriptor = catalog.get(spec['model'])
+    from storm.descriptors import component_snapshot
+    snapshot = component_snapshot(descriptor)
     preapplied_steps = spec.get('preapplied_steps', [])
     if (not isinstance(preapplied_steps, list)
             or any(not isinstance(step, str) or not step for step in preapplied_steps)
@@ -620,6 +654,9 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         if 'checkpoint' not in descriptor.capabilities:
             raise ValueError('Model does not support checkpoints')
         checkpoint = store.load(resume_from)
+        if (checkpoint.get('component_identity') is not None
+                and checkpoint['component_identity'] != snapshot['identity_fingerprint']):
+            raise ValueError('Checkpoint component identity changed; create a new training plan')
         compatible_fingerprint = checkpoint['fingerprint'] == fingerprint(spec)
         if not compatible_fingerprint and isinstance(resume_config, dict):
             current_config = spec.get('config') or {}
@@ -698,6 +735,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
             store.save(kind='checkpoints', artifact_id=execution_id, value={
                 'state': state, 'fingerprint': fingerprint(spec), 'model_version': descriptor.version,
                 'data_fingerprint': data_fingerprint,
+                'component_identity': snapshot['identity_fingerprint'],
                 'fitted_steps': fitted, 'source_execution': execution_id},
                 metadata={'execution_id': execution_id})
             epoch = state.get('epoch') if isinstance(state, dict) else None
@@ -915,7 +953,14 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
     report_progress(
         'saving', 'Resultados guardados', artifact_stage,
         phase_step=artifact_total, phase_total=artifact_total, unit_label='artefactos')
-    result = {'validation_problems': [p.to_dict() for p in validation_problems],
+    configuration_snapshot = getattr(model, 'configuration_snapshot', None)
+    resolved_config = (json_compatible(configuration_snapshot())
+                       if callable(configuration_snapshot) else None)
+    result = {'configuration': {'requested': deepcopy(spec.get('config', {})),
+                                 'resolved': resolved_config,
+                                 'normalized': catalog.normalize(spec['model'], spec.get('config', {}))},
+              'component_snapshot': snapshot,
+              'validation_problems': [p.to_dict() for p in validation_problems],
               'execution_id': execution_id, 'model': spec['model'], 'model_version': descriptor.version,
               'capabilities': list(descriptor.capabilities), 'model_ref': reference.to_dict(),
               'output_ref': output_ref.to_dict(), 'spec': spec, 'fingerprint': fingerprint(spec),

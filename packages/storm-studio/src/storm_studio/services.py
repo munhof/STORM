@@ -47,7 +47,71 @@ def catalog():
     return result
 
 
+def active_plan(study):
+    """Keep execution variants out of the editable plan, including legacy branches."""
+    for revision in study.revision_set.filter(kind='plan').select_related('parent').order_by('-pk'):
+        if revision.payload.get('execution_variant'):
+            continue
+        parent = revision.parent
+        if ('execution_variant' not in revision.payload and parent and revision.payload.get('model') != parent.payload.get('model')
+                and revision.payload.get('model') in parent.payload.get('branch_models', [])
+                and revision.job_set.exists()):
+            continue
+        return revision
+    return None
+
+
+def execution_specs(revision):
+    from storm.plans import branch_specs
+    result = branch_specs(revision.payload)
+    for _, spec in result:
+        recipe_id = spec.get('preparation_revision_id')
+        if recipe_id:
+            recipe = Revision.objects.filter(pk=recipe_id, study=revision.study,
+                                             kind='preparation').first()
+            if recipe is None:
+                raise ValueError('Preparation must belong to this study')
+            source_id = recipe.payload.get('dataset_revision_id')
+            if spec.get('dataset_revision_id') and int(spec['dataset_revision_id']) != source_id:
+                raise ValueError('Preparation belongs to another dataset revision')
+            spec.update(dataset_revision_id=source_id, steps=deepcopy(recipe.payload.get('steps', [])), data={})
+        source_id = spec.get('dataset_revision_id')
+        if source_id:
+            source = DatasetRevision.objects.filter(pk=source_id, status='ready').first()
+            if source is None:
+                raise ValueError('Select a ready registered dataset revision')
+            if source.config.get('inference_only') and spec.get('operation', 'train') != 'infer':
+                raise ValueError('This inference-only benchmark blocks training and updates.')
+            spec.update(connector=source.connector, data={})
+    return result
+
+
+def validate_executions(executions, worker_catalog):
+    from dataclasses import replace
+    from storm.contracts import validate_plan, PlanValidationError
+    problems = [replace(problem, branch=branch)
+                for branch, spec in executions
+                for problem in validate_plan(spec, worker_catalog, plan_data_summary(spec, worker_catalog))]
+    if any(problem.severity == 'error' for problem in problems):
+        raise PlanValidationError(problems)
+    return problems
+
+
 def plan_data_summary(payload, worker_catalog):
+    from storm.plans import branch_specs
+    try:
+        branches = branch_specs(payload)
+    except ValueError:
+        return None
+    summaries = {name: _single_data_summary(spec, worker_catalog) or {}
+                 for name, spec in branches}
+    summary = summaries.pop('root', {})
+    if summaries:
+        summary['branches'] = summaries
+    return summary or None
+
+
+def _single_data_summary(payload, worker_catalog):
     """Inspect metadata only; never load the dataset artifact during preflight."""
     dataset_id = payload.get('dataset_revision_id')
     if not dataset_id:
@@ -95,11 +159,8 @@ def submit(revision, previous=None, operation=None, source=None):
         raise ValueError('Unknown operation')
     if revision.payload.get('label_correction_revision_id') and operation != 'train':
         raise ValueError('Label corrections can only be included in a new training plan.')
-    from storm.contracts import require_valid_plan
-
     worker_catalog = catalog()
-    problems = require_valid_plan(revision.payload, worker_catalog,
-                       plan_data_summary(revision.payload, worker_catalog))
+    problems = validate_executions(execution_specs(revision), worker_catalog)
     dataset_revision_id = revision.payload.get('dataset_revision_id')
     if revision.payload.get('label_correction_revision_id') and dataset_revision_id is None:
         raise ValueError('Label corrections require a registered dataset source.')
@@ -393,7 +454,7 @@ def perform(job_id):
                     kind='checkpoints', artifact_id=str(job.source_id))
                 options['resume_config'] = job.source.revision.payload.get('config', {})
             worker_catalog = catalog()
-            spec = deepcopy(job.revision.payload)
+            spec = execution_specs(job.revision)[0][1]
             spec['data_summary'] = plan_data_summary(spec, worker_catalog)
             progress_callback = lambda update: _record_progress(job_id, update)
             dataset_revision_id = spec.get('dataset_revision_id')
@@ -423,7 +484,7 @@ def perform(job_id):
                             step['type'] for step in preparation.payload.get('steps', [])
                             if isinstance(step, dict) and isinstance(step.get('type'), str)
                         ))
-                if spec.get('preparation_revision_id'):
+                if spec.get('steps'):
                     from storm_studio.data_preparation import resolve_preparation_steps
 
                     spec['steps'] = resolve_preparation_steps(

@@ -266,6 +266,9 @@ class PlanForm(forms.Form):
         widget=forms.CheckboxSelectMultiple,
     )
     branch_configs = forms.JSONField(initial=dict, required=False, widget=forms.HiddenInput)
+    branch_overrides = forms.JSONField(label='Entradas propias por rama', initial=dict,
+        required=False, widget=forms.Textarea(attrs={'rows': 4}),
+        help_text='Objeto por modelo: dataset_revision_id, preparation_revision_id, steps, connector o data.')
     seed = forms.IntegerField(initial=42)
 
     def __init__(self, *args, **kwargs):
@@ -342,6 +345,7 @@ class PlanForm(forms.Form):
                 name: branch_configs.get(name, {})
                 for name in result.get('branch_models', [])
             }
+        result['branch_overrides'] = result.get('branch_overrides') or {}
         from storm.contracts import validate_plan
         from storm_studio.services import plan_data_summary
 

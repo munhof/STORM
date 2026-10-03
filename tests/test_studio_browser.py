@@ -4,6 +4,25 @@ from playwright.sync_api import sync_playwright, expect
 
 
 @pytest.mark.django_db(transaction=True)
+def test_plugin_graph_editor_updates_serializable_configuration(live_server, settings):
+    pytest.importorskip('rainstorm_thesis.plugin')
+    from storm_studio.models import Project, Study
+    settings.STORM_PLUGINS = ['rainstorm_thesis.plugin']
+    study = Study.objects.create(project=Project.objects.create(name='Graph'), name='VAME graph')
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(f'{live_server.url}/studies/{study.pk}/flow/')
+        page.locator('#id_model').select_option('vame_native')
+        page.get_by_role('button', name='Activar grafo').click()
+        page.locator('#model-config-architecture_graph-encoder-type').select_option('encoder.lstm')
+        graph = page.locator('#id_config').evaluate('(element) => JSON.parse(element.value).architecture_graph')
+        assert next(node for node in graph['nodes'] if node['id'] == 'encoder')['type'] == 'encoder.lstm'
+        expect(page.locator('[data-model-graph]')).to_be_visible()
+        browser.close()
+
+
+@pytest.mark.django_db(transaction=True)
 def test_execution_progress_updates_without_reloading_the_page(live_server, tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from django.utils import timezone

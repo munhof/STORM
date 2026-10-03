@@ -85,21 +85,21 @@ def validate_plan(spec, catalog, data_summary=None):
     problems = []
     if not isinstance(spec, dict):
         return [ValidationProblem('plan.invalid', 'error', 'root', '', '', 'Plan must be an object')]
-    summary = dict(data_summary or {})
-    data = spec.get('data') or {}
-    if isinstance(data, dict):
-        summary.setdefault('feature_names', data.get('feature_names', []))
-        if isinstance(data.get('inputs'), list) and data['inputs']:
-            summary.setdefault('shape', _shape(data['inputs'][0]))
-    names = spec.get('branch_models') or []
-    configs = spec.get('branch_configs') or {}
-    if not isinstance(names, list) or not isinstance(configs, dict):
-        return [ValidationProblem('branches.invalid', 'error', 'root', '', 'branch_models',
-                                  'Branches and configurations must be a list and object')]
-    branches = [('root', spec.get('model'), spec.get('config', {}))]
-    branches.extend((str(name), name, configs.get(name, {})) for name in names
-                    if isinstance(name, str) and name != spec.get('model'))
-    for branch, name, config in branches:
+    from storm.plans import branch_specs
+    try:
+        branches = branch_specs(spec)
+    except ValueError as error:
+        return [ValidationProblem('branches.invalid', 'error', 'root', '', 'branch_models', str(error))]
+    for branch, branch_spec in branches:
+        name, config = branch_spec.get('model'), branch_spec.get('config', {})
+        summary = dict((data_summary or {}).get('branches', {}).get(branch, {})
+                       if branch != 'root' and spec.get('branch_overrides', {}).get(branch)
+                       else data_summary or {})
+        data = branch_spec.get('data') or {}
+        if isinstance(data, dict):
+            summary.setdefault('feature_names', data.get('feature_names', []))
+            if isinstance(data.get('inputs'), list) and data['inputs']:
+                summary.setdefault('shape', _shape(data['inputs'][0]))
         def add(code, field, message, severity='error'):
             problems.append(ValidationProblem(code, severity, branch, str(name or ''), field, message))
         try:
@@ -111,7 +111,7 @@ def validate_plan(spec, catalog, data_summary=None):
             catalog.normalize(name, config)
         except (ValueError, TypeError, KeyError) as error:
             add('config.invalid', 'config' if branch == 'root' else 'branch_configs', str(error))
-        steps = spec.get('steps') or []
+        steps = branch_spec.get('steps') or []
         if not isinstance(steps, list):
             add('preparation.invalid', 'steps', 'Steps must be a list')
             continue
@@ -125,7 +125,7 @@ def validate_plan(spec, catalog, data_summary=None):
                       and isinstance(step.get('type'), str)}
         if contract is None or contract.preparation == 'unknown':
             add('input.unknown', 'model', 'Input requirements are unknown for this legacy component', 'warning')
-        elif contract.preparation == 'internal' and (steps or prior or spec.get('preapplied_steps')):
+        elif contract.preparation == 'internal' and (steps or prior or branch_spec.get('preapplied_steps')):
             add('preparation.external_forbidden', 'steps', 'This model rejects external preparation steps')
         if contract:
             for required in contract.required_steps:

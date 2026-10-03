@@ -229,14 +229,14 @@ se concentra en los siguientes issues; no se crea un roadmap independiente.
 | ID | Prioridad | Issue definitivo | Estado de esta entrega |
 |---|---|---|---|
 | ST-01 | P0 | [Implementar contratos de entrada y validación compartida antes de encolar](https://github.com/munhof/STORM/issues/2) | Implementado con regresiones; issue abierto para revisión |
-| ST-02 | P0 | [Separar plan activo de variantes de ejecución y evitar ramas heredadas](https://github.com/munhof/STORM/issues/3) | Pendiente |
-| ST-03 | P0 | [Permitir dataset y preparación propios por rama](https://github.com/munhof/STORM/issues/4) | Pendiente |
+| ST-02 | P0 | [Separar plan activo de variantes de ejecución y evitar ramas heredadas](https://github.com/munhof/STORM/issues/3) | Implementado con regresiones (2026-10-03); aceptación abierta |
+| ST-03 | P0 | [Permitir dataset y preparación propios por rama](https://github.com/munhof/STORM/issues/4) | Implementado con regresiones (2026-10-03); aceptación abierta |
 | ST-04 | P1 | [Reutilizar preparación compatible y mostrar motivos de cache hit/miss](https://github.com/munhof/STORM/issues/5) | Pendiente |
 | ST-05 | P1 | [Retener checkpoints históricos y validar continuidad](https://github.com/munhof/STORM/issues/6) | Pendiente |
 | ST-06 | P1 | [Normalizar avance por fase, lote y sesión; separar heartbeat de progreso](https://github.com/munhof/STORM/issues/7) | Pendiente |
 | ST-07 | P1 | [Validar tareas, métricas y compatibilidad antes de comparar](https://github.com/munhof/STORM/issues/8) | Pendiente |
-| ST-08 | P2 | [Extender catálogo y hosts de UI mediante descriptores de plugins](https://github.com/munhof/STORM/issues/9) | Pendiente |
-| ST-09 | P2 | [Editor gráfico con validación, teclado y equivalencia con especificaciones Python](https://github.com/munhof/STORM/issues/10) | Pendiente |
+| ST-08 | P2 | [Extender catálogo y hosts de UI mediante descriptores de plugins](https://github.com/munhof/STORM/issues/9) | Base de descriptores y grafo VAE; editor general pendiente |
+| ST-09 | P2 | [Editor gráfico con validación, teclado y equivalencia con especificaciones Python](https://github.com/munhof/STORM/issues/10) | Base de descriptores y grafo VAE; editor general pendiente |
 | ST-10 | P2 | [SDK de extensiones y publicación opcional de código en workers aislados](https://github.com/munhof/STORM/issues/11) | Pendiente |
 | ST-11 | P3 | [Dashboards con gráficos, tablas y evidencia sincronizada](https://github.com/munhof/STORM/issues/12) | Pendiente |
 | ST-12 | P3 | [Exportación, restauración y aceptación desde instalación limpia](https://github.com/munhof/STORM/issues/13) | Pendiente |
@@ -248,9 +248,10 @@ ST-11 depende de alineación y comparación verificadas. GPU Hang se trata por
 RS-08 independientemente del preprocesado. Dependencias detalladas y aceptación
 están en cada issue.
 
-La primera entrega implementa contratos y preflight; reconstrucción científica,
-plan activo/variantes, inputs por rama, editor gráfico y dashboards permanecen
-pendientes. No se modifican revisiones históricas ni se inician entrenamientos.
+La entrega del 2026-10-02 implementó contratos y preflight. La ampliación del
+2026-10-03 agrega planes/variantes, inputs por rama y grafo VAE inicial.
+Reconstrucción científica, editor general y dashboards siguen pendientes.
+Se conservan las revisiones históricas; se verifican sólo fixtures CPU pequeñas.
 
 ### Verificación de la primera entrega
 

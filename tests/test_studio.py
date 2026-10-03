@@ -1426,6 +1426,49 @@ def test_pose_preparation_names_resolve_after_coordinate_selection():
         'threshold': 0.7, 'coordinate_pairs': [[0, 1]]}
 
 
+def test_inline_pose_steps_are_resolved_for_registered_data_without_saved_recipe(
+        settings, tmp_path, monkeypatch):
+    from storm_studio import dataset_inventory, services, video_timeline_reviews
+    from storm_studio.models import Dataset, DatasetRevision, Job, Project, Revision, Study
+
+    settings.ARTIFACT_ROOT = tmp_path
+    dataset = Dataset.objects.create(name='Inline pose preparation')
+    source = DatasetRevision.objects.create(
+        dataset=dataset, number=1, connector='dlc_h5', status='ready',
+        inventory={'feature_names': ['nose_x', 'nose_y', 'body_x', 'body_y']})
+    study = Study.objects.create(
+        project=Project.objects.create(name='P'), name='Inline pose',
+        dataset_revision=source)
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'operation': 'train', 'model': 'identity', 'connector': 'dlc_h5',
+        'dataset_revision_id': source.pk, 'preparation_revision_id': None,
+        'config': {}, 'data': {}, 'metrics': [], 'seed': 156,
+        'steps': [
+            {'type': 'pose.select_coordinates',
+             'config': {'names': ['nose_x', 'nose_y']}},
+            {'type': 'pose.likelihood_filter',
+             'config': {'threshold': 0.6, 'bodyparts': ['nose']}},
+        ],
+    })
+    job = Job.objects.create(revision=plan, operation='train', status='pending')
+    captured = {}
+
+    monkeypatch.setattr(video_timeline_reviews, 'require_review', lambda *_args: None)
+    monkeypatch.setattr(dataset_inventory, 'connector_input', lambda *_args, **_kwargs: {
+        'inputs': [[1.0, 2.0]], 'train': [0], 'test': [0],
+    })
+    monkeypatch.setattr(services, 'execute', lambda spec, *_args, **_kwargs: (
+        captured.update(spec) or {'spec': spec}))
+
+    services.perform(str(job.pk))
+
+    job.refresh_from_db()
+    assert job.status == 'completed', job.error
+    assert captured['steps'][1]['config'] == {
+        'threshold': 0.6, 'coordinate_pairs': [[0, 1]],
+    }
+
+
 def test_pose_orientation_names_resolve_after_coordinate_selection():
     from storm_studio.data_preparation import resolve_preparation_steps
 

@@ -158,10 +158,11 @@
 <section class="card" aria-labelledby="data-config-title"><h3 id="data-config-title">Datos y particiones</h3><div><label for="{{ form.dataset_revision_id.id_for_label }}">Fuente registrada</label>{{ form.dataset_revision_id }}{{ form.dataset_revision_id.errors }}<small class="muted">Elegí una revisión inspeccionada para que el worker recupere pose, etiquetas y metadatos originales. Dejá “Usar datos del plan” para entradas manuales.</small></div><div><label for="{{ form.label_correction_revision_id.id_for_label }}">{{ form.label_correction_revision_id.label }}</label>{{ form.label_correction_revision_id }}{{ form.label_correction_revision_id.errors }}<small class="muted">Esto crea una revisión nueva del plan. Sólo agrega correcciones a observaciones de entrenamiento sin reserva; las particiones de evaluación quedan intactas.</small></div><p>Usá los índices de observación que se muestran en la vista previa. Separalos con comas. Las particiones deben ser disjuntas.</p><div class="grid">{% for row in partition_rows %}<div><label for="partition-{{ row.key }}">{{ row.label }} (índices)</label><input id="partition-{{ row.key }}" data-partition="{{ row.key }}" value="{{ row.value }}" inputmode="numeric" aria-describedby="partition-help"></div>{% endfor %}</div><small id="partition-help" class="muted">Ejemplo: 0, 1, 2. La reserva de evaluación y las máscaras del benchmark se administran desde Datos.</small>{{ form.data.errors }}</section>
 <section class="card" aria-labelledby="model-config-title"><h3 id="model-config-title">Parámetros del modelo</h3><p>Los campos cambian según el modelo elegido. Studio valida estos valores al guardar.</p><div id="config-fields" class="grid"></div>{{ form.config.errors }}</section>
 <section class="card" aria-labelledby="prep-title"><h3 id="prep-title">Receta de procesamiento</h3><label for="{{ form.preparation_revision_id.id_for_label }}">Pipeline codeless guardada</label>{{ form.preparation_revision_id }}{{ form.preparation_revision_id.errors }}<p>Las transformaciones se diseñan en Preparar, se previsualizan sobre el dataset y se reutilizan en este plan. <a href="{% url 'page' study.pk 'prepare' %}">Crear o editar una receta</a>.</p>{{ form.steps.errors }}<div hidden><ol id="steps-preview"></ol><button type="button" id="preview-pipeline" data-url="{% url 'pipeline-preview' study.pk %}">Vista previa heredada</button><p id="preview-status"></p><table id="pipeline-preview-table"><tbody></tbody></table></div></section>
-<section class="card" aria-labelledby="branches-title"><h3 id="branches-title">Ramas para comparar</h3><p>Elegí otros modelos para evaluar con estos mismos datos y pasos de preparación. Podés ajustar sus parámetros por separado.</p><fieldset><legend>Modelos adicionales</legend>{{ form.branch_models }}{{ form.branch_models.errors }}</fieldset><div id="branch-config-fields" class="grid"></div>{{ form.branch_configs.errors }}</section>
+<section class="card" aria-labelledby="branches-title"><h3 id="branches-title">Ramas para comparar</h3><p>Elegí otros modelos y ajustá sus parámetros. Cada rama puede declarar sus propios datos y pasos de preparación.</p><fieldset><legend>Modelos adicionales</legend>{{ form.branch_models }}{{ form.branch_models.errors }}</fieldset><div id="branch-config-fields" class="grid"></div>{{ form.branch_configs.errors }}<details><summary>Entradas propias por rama</summary>{{ form.branch_overrides.label_tag }}{{ form.branch_overrides }}{{ form.branch_overrides.errors }}<small>{{ form.branch_overrides.help_text }}</small></details></section>
 <button>Guardar revisión del plan</button></form></section>
 {{ catalog|json_script:'catalog-data' }}
 {{ dataset_adapter_map|json_script:'dataset-adapter-map' }}
+{% include 'storm_studio/model_graph_editor.html' %}
 <script>
 (() => {
   const catalog = JSON.parse(document.getElementById('catalog-data').textContent);
@@ -206,13 +207,16 @@
       ? 'Usa el adapter y los pesos preentrenados indicados en su configuración.'
       : 'Para inferir con un modelo ajustado, abrí su corrida guardada en Modelos.';
   }
-  function renderConfigValue(name, schema, value, id, update, required = false) {
+  function renderConfigValue(name, schema, value, id, update, required = false, graphDescriptor = null) {
+    if (graphDescriptor && graphDescriptor.field === name) {
+      return window.StormModelGraph.render(graphDescriptor, value, id, update, renderConfigValue);
+    }
     const wrapper = document.createElement('div');
     const label = document.createElement('label');
     label.htmlFor = id;
     label.textContent = readable(name);
     const kind = schema.type;
-    if (kind === 'array' || (kind === 'object' &&
+    if (kind === 'array' || (kind === 'object' && !schema.properties &&
         (!value || typeof value !== 'object' || Array.isArray(value) || !Object.keys(value).length))) {
       const textarea = document.createElement('textarea');
       textarea.id = id;
@@ -258,9 +262,11 @@
         hint.textContent = schema.description;
         fieldset.append(hint);
       }
-      for (const [key, initial] of Object.entries(nested)) {
-        const childSchema = {type: typeof initial === 'boolean' ? 'boolean' :
-          (typeof initial === 'number' ? (Number.isInteger(initial) ? 'integer' : 'number') : 'string')};
+      const properties = schema.properties || Object.fromEntries(Object.entries(nested).map(([key, initial]) =>
+        [key, {type: typeof initial === 'boolean' ? 'boolean' :
+          (typeof initial === 'number' ? (Number.isInteger(initial) ? 'integer' : 'number') : 'string')} ]));
+      for (const [key, childSchema] of Object.entries(properties)) {
+        const initial = nested[key] ?? childSchema.default;
         const child = renderConfigValue(key, childSchema, initial, `${id}-${key}`, next => {
           if (next === undefined) delete nested[key]; else nested[key] = next;
           update({...nested});
@@ -288,7 +294,7 @@
     }
     input.id = id;
     input.required = required;
-    if (input.type === 'checkbox') input.checked = Boolean(value);
+    if (input.type === 'checkbox') { input.checked = Boolean(value); input.indeterminate = value === undefined; }
     else if (value !== undefined) input.value = value;
     const commit = () => {
       const next = input.type === 'checkbox' ? input.checked :
@@ -335,7 +341,7 @@
         const current = (() => { try { return JSON.parse(config.value || '{}'); } catch (_) { return {}; } })();
         if (next === undefined) delete current[name]; else current[name] = next;
         config.value = JSON.stringify(current);
-      }, (model.schema.required || []).includes(name));
+      }, (model.schema.required || []).includes(name), model.descriptor?.graph);
       configFields.append(editor);
     }
     document.querySelectorAll('input[name="branch_models"]').forEach(input => {
@@ -364,7 +370,7 @@
           const current = configs[model.name] || {};
           if (next === undefined) delete current[name]; else current[name] = next;
           configs[model.name] = current; branchConfigsField.value = JSON.stringify(configs);
-        }, (model.schema.required || []).includes(name)));
+        }, (model.schema.required || []).includes(name), model.descriptor?.graph));
       }
       branchConfigFields.append(card);
     }

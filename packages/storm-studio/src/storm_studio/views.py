@@ -1153,7 +1153,7 @@ def archive_preparation(request, revision_id):
         marker.delete()
         messages.success(request, 'Receta restaurada en la lista activa.')
     else:
-        latest_plan = recipe.study.revision_set.filter(kind='plan').order_by('-pk').first()
+        latest_plan = services.active_plan(recipe.study)
         active_job = Job.objects.filter(
             revision=recipe, operation='prepare', status__in=('pending', 'running')).exists()
         if (latest_plan and latest_plan.payload.get('preparation_revision_id') == recipe.pk) or active_job:
@@ -1171,7 +1171,7 @@ def page(request, study_id, section):
         raise Http404
     ui_catalog = services.catalog()
     recipe_presets = list(ui_catalog.recipe_presets.values())
-    latest = study.revision_set.filter(kind='plan').order_by('-pk').first()
+    latest = services.active_plan(study)
     restored_snapshot = None
     snapshot_id = request.GET.get('snapshot')
     if snapshot_id:
@@ -1378,6 +1378,7 @@ def page(request, study_id, section):
                             except ValueError as error:
                                 form.add_error('label_correction_revision_id', str(error))
                 if not form.errors:
+                    payload['execution_variant'] = False
                     revision = Revision.objects.create(
                         study=study, kind='plan', parent=latest, payload=payload)
                     messages.success(request, f'Plan guardado como revisión {revision.pk}.')
@@ -2124,65 +2125,44 @@ def run(request, revision_id):
         )
         return redirect('page', revision.study_id, 'jobs')
 
-    branch_models = list(dict.fromkeys(
-        [revision.payload.get('model'), *revision.payload.get('branch_models', [])]))
-    selected_models = request.POST.getlist('models')
-    planned_models = (branch_models if request.POST.get('run_branches') else
-                      selected_models or [revision.payload.get('model')])
     worker_catalog = services.catalog()
-    prepared_step_types = set()
-    if (dataset_revision is not None
-            and dataset_revision.connector == 'prepared_artifact'
-            and dataset_revision.status == 'ready'
-            and dataset_revision.artifact_ref):
-        preparation_id = dataset_revision.config.get('preparation_revision_id')
-        preparation = Revision.objects.filter(
-            pk=preparation_id, study=revision.study, kind='preparation').first()
-        if preparation is not None:
-            prepared_step_types = {
-                step.get('type') for step in preparation.payload.get('steps', [])
-                if isinstance(step, dict)
-            }
-    for model_name in planned_models:
-        missing_steps = missing_required_pipeline_steps(
-            model_name, revision.payload.get('steps', []), worker_catalog)
-        missing_steps = [step for step in missing_steps
-                         if step not in prepared_step_types]
-        if missing_steps:
-            model_label = {
-                'vame_native': 'VAME nativo',
-                'vame_official': 'VAME oficial',
-            }.get(model_name, model_name)
-            missing_labels = [
-                PREPARATION_STEP_UI.get(step, {}).get('label', step)
-                for step in missing_steps
-            ]
-            if model_name == 'vame_native' and 'pose.temporal_windows' in missing_steps:
-                explanation = (
-                    'Las ventanas agrupan frames vecinos para que el modelo pueda '
-                    'aprender patrones de movimiento.'
-                )
-            else:
-                explanation = 'El modelo no puede iniciar sin estos pasos de entrada.'
-            messages.error(
-                request,
-                f"No se inició la corrida de {model_label}. Falta "
-                f"{', '.join(missing_labels)} en la configuración del modelo. "
-                f"{explanation} No se creó una ejecución ni se modificaron los datos. "
-                'Cargá la receta del modelo en Configurar, guardá el plan y volvé a iniciarlo.',
-            )
-            target = reverse('page', args=(revision.study_id, 'prepare'))
-            target += '?' + urlencode({
-                'required_step': missing_steps,
-                'required_model': model_name,
-            }, doseq=True)
-            return redirect(target)
-    from storm.contracts import require_valid_plan
-
     try:
-        problems = require_valid_plan(
-            revision.payload, worker_catalog,
-            services.plan_data_summary(revision.payload, worker_catalog))
+        executions = services.execution_specs(revision)
+    except ValueError as error:
+        messages.error(request, str(error))
+        return redirect('page', revision.study_id, 'flow')
+    selected_models = request.POST.getlist('models')
+    if not request.POST.get('run_branches'):
+        selected = set(selected_models or [revision.payload.get('model')])
+        executions = [(name, spec) for name, spec in executions if spec.get('model') in selected]
+        if selected - {spec.get('model') for _, spec in executions}:
+            return HttpResponse('Select models declared in the plan', status=400)
+    # Preserve the declared legacy execution barrier until old plugins adopt contracts.
+    for branch, spec in executions:
+        missing_steps = missing_required_pipeline_steps(spec['model'], spec.get('steps', []), worker_catalog)
+        source = DatasetRevision.objects.filter(pk=spec.get('dataset_revision_id')).first()
+        if source and source.connector == 'prepared_artifact' and source.status == 'ready' and source.artifact_ref:
+            recipe = Revision.objects.filter(pk=source.config.get('preparation_revision_id'),
+                                             study=revision.study, kind='preparation').first()
+            if recipe:
+                prepared = {step.get('type') for step in recipe.payload.get('steps', [])}
+                missing_steps = [step for step in missing_steps if step not in prepared]
+        if missing_steps:
+            label = {'vame_native': 'VAME nativo', 'vame_official': 'VAME oficial'}.get(spec['model'], spec['model'])
+            labels = [PREPARATION_STEP_UI.get(step, {}).get('label', step) for step in missing_steps]
+            messages.error(request, f"No se inició la corrida de {label}. Falta {', '.join(labels)}. "
+                           'Cargá la receta del modelo en Configurar y guardá el plan.')
+            target = reverse('page', args=(revision.study_id, 'prepare'))
+            return redirect(target + '?' + urlencode({'required_step': missing_steps,
+                                                     'required_model': spec['model']}, doseq=True))
+    try:
+        for branch, spec in executions:
+            from storm_studio.video_timeline_reviews import require_review
+            branch_dataset_id = spec.get('dataset_revision_id')
+            if branch_dataset_id is not None:
+                branch_dataset = get_object_or_404(DatasetRevision, pk=branch_dataset_id, status='ready')
+                require_review(revision.study, branch_dataset)
+        problems = services.validate_executions(executions, worker_catalog)
     except ValueError as error:
         messages.error(
             request,
@@ -2193,40 +2173,16 @@ def run(request, revision_id):
     for problem in problems:
         if problem.severity == 'warning':
             messages.warning(request, f'{problem.branch}: {problem.message}')
-    if request.POST.get('run_branches'):
-        primary_model = revision.payload.get('model')
-        try:
-            worker_catalog.validate(primary_model, revision.payload.get('config', {}))
-            for model in branch_models[1:]:
-                worker_catalog.validate(
-                    model, revision.payload.get('branch_configs', {}).get(model, {}))
-        except (KeyError, ValueError) as error:
-            return HttpResponse(f'Unknown or incompatible model: {error}', status=400)
-        from django.db import transaction
-        with transaction.atomic():
+    for branch, spec in executions:
+        if branch == 'root':
             services.submit(revision)
-            for model in branch_models[1:]:
-                config = revision.payload.get('branch_configs', {}).get(model, {})
-                payload = dict(revision.payload, model=model, config=config)
-                variant = Revision.objects.create(study=revision.study, kind='plan',
-                                                  parent=revision, payload=payload)
-                services.submit(variant)
-        return redirect('page', revision.study_id, 'jobs')
-    if selected_models:
-        from django.db import transaction
-        with transaction.atomic():
-            for model in selected_models:
-                try:
-                    worker_catalog.validate(model, {})
-                except (KeyError, ValueError):
-                    return HttpResponse('Unknown or incompatible model', status=400)
-            for model in selected_models:
-                payload = dict(revision.payload, model=model, config={})
-                variant = Revision.objects.create(study=revision.study, kind='plan', parent=revision, payload=payload)
-                services.submit(variant)
-    else:
-        services.submit(revision)
+        else:
+            spec['execution_variant'] = True
+            variant = Revision.objects.create(study=revision.study, kind='plan',
+                                              parent=revision, payload=spec)
+            services.submit(variant)
     return redirect('page', revision.study_id, 'jobs')
+
 
 
 @require_POST
@@ -2258,6 +2214,8 @@ def action(request, job_id, operation):
             payload.pop('label_correction_revision_id', None)
             payload.pop('branch_models', None)
             payload.pop('branch_configs', None)
+            payload.pop('branch_overrides', None)
+            payload['execution_variant'] = True
             from django.db import transaction
             with transaction.atomic():
                 revision = Revision.objects.create(
@@ -2282,7 +2240,9 @@ def action(request, job_id, operation):
                 raise ValueError('This model does not support incremental updates')
             data = json.loads(request.POST.get('data', '{}'))
             validate_data(data, numeric=job.result['spec'].get('connector', 'numeric_json') == 'numeric_json')
-            spec = dict(job.revision.payload, data=data)
+            spec = dict(job.revision.payload, data=data, execution_variant=True)
+            for key in ('branch_models', 'branch_configs', 'branch_overrides'):
+                spec.pop(key, None)
             revision = Revision.objects.create(study=job.revision.study, kind='plan', parent=job.revision, payload=spec)
             services.submit(revision, operation='update', source=job)
             return redirect('page', job.revision.study_id, 'jobs')
@@ -2356,13 +2316,15 @@ def revise(request, revision_id):
             services.review(revision, json.loads(request.POST.get('labels', '{}')),
                             json.loads(request.POST.get('constraints', '[]')))
         elif revision.kind == 'plan':
-            Revision.objects.create(study=revision.study, kind='plan', parent=revision, payload=revision.payload)
+            Revision.objects.create(study=revision.study, kind='plan', parent=revision,
+                                    payload=dict(revision.payload, execution_variant=False))
         elif revision.kind == 'snapshot':
             restored = Revision.objects.create(study=revision.study, kind='snapshot', parent=revision, payload=revision.payload)
             plan_id = revision.payload.get('plan_revision')
             if plan_id:
                 plan = get_object_or_404(Revision, pk=plan_id, study=revision.study, kind='plan')
-                Revision.objects.create(study=plan.study, kind='plan', parent=plan, payload=plan.payload)
+                Revision.objects.create(study=plan.study, kind='plan', parent=plan,
+                                        payload=dict(plan.payload, execution_variant=False))
             return redirect(f'/studies/{revision.study_id}/{revision.payload["section"]}/?snapshot={restored.pk}')
         else:
             return HttpResponse(status=400)
@@ -3385,7 +3347,7 @@ def snapshot(request, study_id):
     section = request.POST.get('section', 'history')
     if section not in dict(PAGES):
         return HttpResponse(status=400)
-    latest = study.revision_set.filter(kind='plan').order_by('-pk').first()
+    latest = services.active_plan(study)
     try:
         visual_state = json.loads(request.POST.get('state', '{}'))
     except (TypeError, json.JSONDecodeError) as error:
@@ -3403,7 +3365,7 @@ def snapshot(request, study_id):
 @require_POST
 def import_data(request, study_id):
     study = get_object_or_404(Study, pk=study_id)
-    previous = study.revision_set.filter(kind='plan').order_by('-pk').first()
+    previous = services.active_plan(study)
     current = previous.payload if previous else {}
     uploaded = request.FILES.get('dataset')
     if uploaded is None or uploaded.size > 2_000_000:
