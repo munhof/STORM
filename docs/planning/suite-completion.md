@@ -256,7 +256,7 @@ pendientes. No se modifican revisiones históricas ni se inician entrenamientos.
 
 Pruebas escritas antes de implementación y comprobadas fallidas por interfaces
 faltantes; la regresión adicional del endpoint reprodujo HTTP 500 antes de su fix.
-13 pruebas nuevas de STORM y 2 de RAINSTORM cubren diagnóstico por rama, cero jobs,
+14 pruebas nuevas de STORM y 2 de RAINSTORM cubren diagnóstico por rama, cero jobs,
 proveniencia materializada, shapes, plugins numéricos, imports lazy y callbacks.
 La suite STORM (sin navegador) reportó 255 aprobadas y 1 fallo previo de retención;
 el mismo fallo fue reproducido con suite.py de HEAD previo en una copia aislada.
@@ -267,3 +267,8 @@ MkDocs estricto y comprobación de enlaces/diffs forman parte de la publicación
 El [protocolo compartido](https://github.com/munhof/STORM/blob/contracts-backlog-20261002/CONTRIBUTING.md)
 exige reproducir, comprobar test fallido, cambio mínimo, regresión, contrato/guía/evidencia
 y cierre sólo con aceptación. Roadmaps anteriores permanecen históricos.
+
+La copia aislada del contenido exacto publicado, sin cambios locales previos,
+pasó 256 pruebas de STORM (excluye tests de navegador). El workspace conserva
+la regresión local de retención que motivó ST-05; no se incluye en estos commits.
+STORM contratos: `e08b9a4059e22191ed4dbfb6f31d9897a5368e05`.
