@@ -1224,6 +1224,7 @@ def page(request, study_id, section):
                 'preparation_revision_id': '',
                 'branch_models': [],
                 'branch_configs': {},
+                'branch_overrides': {},
                 'seed': 156,
             })
     all_preparation_revisions = list(Revision.objects.filter(
@@ -2260,6 +2261,9 @@ def action(request, job_id, operation):
                 payload = deepcopy(job.revision.payload)
                 payload['config'] = dict(payload.get('config') or {})
                 payload['config']['device'] = requested_device
+                payload['execution_variant'] = True
+                for key in ('branch_models', 'branch_configs', 'branch_overrides'):
+                    payload.pop(key, None)
                 revision = Revision.objects.create(
                     study=job.revision.study, kind='plan', parent=job.revision,
                     payload=payload)

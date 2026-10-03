@@ -98,3 +98,48 @@ def test_submission_diagnostics_keep_branch_identity():
         services.submit(revision)
     assert any(p.branch == 'constant' and p.code == 'config.invalid' for p in caught.value.problems)
     assert not Job.objects.exists()
+
+
+@pytest.mark.django_db
+def test_loading_recipe_clears_overrides_from_inherited_branches(client, monkeypatch):
+    from storm.suite import default_catalog
+    from storm_studio import services
+    from storm_studio.models import Project, Revision, Study
+    catalog = default_catalog()
+    catalog.register_recipe_preset({'id': 'fresh', 'model': 'identity', 'config': {}, 'steps': []})
+    monkeypatch.setattr(services, 'catalog', lambda: catalog)
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='S')
+    original = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'constant', 'branch_models': ['identity'],
+        'branch_overrides': {'identity': {'steps': [{'type': 'scale', 'factor': 3}]}}})
+    response = client.get(f'/studies/{study.pk}/flow/?recipe_preset=fresh')
+    assert response.context['form'].initial['branch_models'] == []
+    assert response.context['form'].initial['branch_overrides'] == {}
+    original.refresh_from_db()
+    assert original.payload['branch_overrides']['identity']['steps']
+
+
+@pytest.mark.django_db
+def test_device_resume_preserves_editable_plan(client, settings, tmp_path, monkeypatch):
+    from storm.artifacts import FileArtifactStore
+    from storm.suite import default_catalog
+    from storm_studio import services
+    from storm_studio.models import Job, Project, Revision, Study
+    settings.ARTIFACT_ROOT = tmp_path
+    catalog = default_catalog()
+    catalog.get('identity').schema.setdefault('properties', {})['device'] = {
+        'type': 'string', 'enum': ['cpu', 'cuda']}
+    monkeypatch.setattr(services, 'catalog', lambda: catalog)
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='S')
+    plan = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'identity', 'config': {'device': 'cpu'}, 'execution_variant': False,
+        'branch_models': ['constant'], 'branch_configs': {'constant': {'value': 3}},
+        'branch_overrides': {'constant': {'steps': []}}})
+    source = Job.objects.create(revision=plan, status='interrupted')
+    FileArtifactStore(tmp_path).save(kind='checkpoints', artifact_id=str(source.pk), value={})
+    response = client.post(f'/jobs/{source.pk}/resume/', {'device': 'cuda'})
+    assert response.status_code == 302
+    assert services.active_plan(study).pk == plan.pk
+    resumed = Job.objects.get(operation='resume').revision
+    assert resumed.payload['config']['device'] == 'cuda'
+    assert all(key not in resumed.payload for key in ('branch_models', 'branch_configs', 'branch_overrides'))
