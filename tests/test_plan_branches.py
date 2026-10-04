@@ -143,3 +143,22 @@ def test_device_resume_preserves_editable_plan(client, settings, tmp_path, monke
     resumed = Job.objects.get(operation='resume').revision
     assert resumed.payload['config']['device'] == 'cuda'
     assert all(key not in resumed.payload for key in ('branch_models', 'branch_configs', 'branch_overrides'))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('overrides', [{}, {'constant': {'steps': []}}])
+def test_execution_card_describes_preparation_without_claiming_readiness(client, overrides):
+    from storm_studio.models import Project, Revision, Study
+    study = Study.objects.create(project=Project.objects.create(name='P'), name='S')
+    Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'identity', 'branch_models': ['constant'], 'branch_overrides': overrides})
+    response = client.get(f'/studies/{study.pk}/jobs/')
+    content = response.content.decode()
+    assert 'Plan activo' in content
+    assert 'Pipeline lista para ejecutar' not in content
+    assert 'no garantiza que los datos superen' in content
+    if overrides:
+        assert 'Hay entradas o preparación propias por rama' in content
+        assert 'Todas las ramas usan las mismas sesiones' not in content
+    else:
+        assert 'Todas las ramas heredan' in content
