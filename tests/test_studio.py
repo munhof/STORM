@@ -718,10 +718,10 @@ def test_study_header_exposes_traceable_lifecycle(client, settings, tmp_path):
     job = submit(revision)
     perform(str(job.pk))
     page = client.get(f'/studies/{study.pk}/evidence/')
-    assert b'Estado del estudio' in page.content
+    assert b'Estado del estudio' not in page.content
     assert b'Plan activo' in page.content
     assert b'Ejecuci' in page.content
-    assert b'Evidencia disponible' in page.content
+    assert b'Resultados' in page.content
 
 
 def test_study_uses_task_sidebar_and_single_study_header(client):
@@ -732,13 +732,12 @@ def test_study_uses_task_sidebar_and_single_study_header(client):
 
     assert response.status_code == 200
     assert response.content.count(b'<header') == 1
-    assert b'aria-label="Etapas del estudio"' in response.content
-    for label in ('Datos', 'Preparar', 'Configurar', 'Modelar', 'Ejecuciones',
-                  'Analizar', 'Revisar', 'Comparar', 'Reportar'):
+    assert 'aria-label="Navegación del estudio"'.encode() in response.content
+    for label in ('Experimento', 'Datos', 'Ejecuciones', 'Resultados', 'Planes anteriores', 'Herramientas'):
         assert label.encode() in response.content
     assert b'Etiquetar' not in response.content
-    assert 'Próxima acción'.encode() in response.content
-    assert b'Dataset activo' in response.content
+    assert 'Próxima acción'.encode() not in response.content
+    assert b'Resumen del estudio' not in response.content
 
 
 def test_flow_page_exposes_pipeline_settings_without_editable_json(client):
@@ -772,7 +771,7 @@ def test_preparation_recipe_is_saved_separately_from_model_plans(client):
     study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
                                  dataset_revision=source)
 
-    page = client.get(f'/studies/{study.pk}/prepare/')
+    page = client.get(f'/studies/{study.pk}/prepare/?editor=recipes')
     assert page.status_code == 200
     content = page.content.decode()
     assert 'Cómo preparar los datos por separado del modelo' in content
@@ -811,7 +810,7 @@ def test_prepare_analyze_and_review_explain_the_operator_workflow(client, settin
     job = submit(plan)
     perform(str(job.pk))
 
-    prepare = client.get(f'/studies/{study.pk}/prepare/').content.decode()
+    prepare = client.get(f'/studies/{study.pk}/prepare/?editor=recipes').content.decode()
     analyze = client.get(f'/studies/{study.pk}/evidence/').content.decode()
     review = client.get(f'/studies/{study.pk}/review/').content.decode()
 
@@ -847,7 +846,7 @@ def test_prepare_page_shows_the_registered_pose_xy_and_roi_preview(client):
     study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
                                  dataset_revision=source)
 
-    response = client.get(f'/studies/{study.pk}/prepare/')
+    response = client.get(f'/studies/{study.pk}/prepare/?editor=recipes')
 
     assert response.status_code == 200
     assert b'id="pose-motion"' in response.content
@@ -910,7 +909,7 @@ def test_unused_preparation_can_be_archived_but_active_recipe_is_protected(clien
     archived = client.post(f'/preparations/{recipe.pk}/archive/')
 
     assert archived.status_code == 302
-    prepare = client.get(f'/studies/{study.pk}/prepare/')
+    prepare = client.get(f'/studies/{study.pk}/prepare/?editor=recipes')
     assert b'Recetas archivadas' in prepare.content
     assert b'Center pose' in prepare.content
     assert f'name="run_preparation_revision_id" value="{recipe.pk}"'.encode() not in prepare.content
@@ -936,10 +935,10 @@ def test_primary_navigation_hides_duplicate_and_advanced_sections(client):
 
     assert response.status_code == 200
     assert 'Accesos rápidos' not in content
-    assert 'Vistas avanzadas' in content
+    assert 'Herramientas' in content
     assert 'Etiquetar' not in content
-    assert 'Comparar' in content
-    assert 'Lineage' in content and 'Historial' in content
+    assert 'Resultados' in content
+    assert 'Trazabilidad' in content and 'Historial' in content
 
 
 def test_wide_studio_uses_available_width_and_large_previews_can_be_collapsed(client):
@@ -955,10 +954,10 @@ def test_wide_studio_uses_available_width_and_large_previews_can_be_collapsed(cl
     study = Study.objects.create(project=Project.objects.create(name='P'), name='S',
                                  dataset_revision=source)
 
-    response = client.get(f'/studies/{study.pk}/prepare/')
+    response = client.get(f'/studies/{study.pk}/prepare/?editor=recipes')
     content = response.content.decode()
 
-    assert 'main{width:min(1680px,100%)' in content
+    assert '/experiment-assets/studio.css' in content
     assert '<details class="card" id="prepare-pose-preview" open>' in content
     assert '<summary>Vista visual de pose y ROI' in content
 
@@ -970,13 +969,13 @@ def test_sidebar_groups_study_stages_as_an_indented_tree(client):
     response = client.get(f'/studies/{study.pk}/flow/')
     content = response.content.decode()
 
-    assert '<nav aria-label="Etapas del estudio" class="stage-tree">' in content
-    for group in ('Datos y preparación', 'Entrenamiento', 'Análisis y revisión', 'Reportes'):
-        assert group in content
-    training_group = content.split('<summary>Entrenamiento</summary>', 1)[1].split('</details>', 1)[0]
-    assert 'stage-tree__items' in training_group
-    assert '/studies/{}/jobs/'.format(study.pk) in training_group
-    assert '.stage-tree__items{list-style:none;margin:0 0 10px 15px' in content
+    assert 'aria-label="Navegación del estudio"' in content
+    legacy = content.split('<summary>Planes anteriores</summary>', 1)[1].split('</details>', 1)[0]
+    for section in ('prepare', 'flow', 'models'):
+        assert f'/studies/{study.pk}/{section}/' in legacy
+    tools = content.split('<summary>Herramientas</summary>', 1)[1].split('</details>', 1)[0]
+    for section in ('history', 'lineage', 'components'):
+        assert f'/studies/{study.pk}/{section}/' in tools
 
 
 def test_model_plan_can_reuse_a_saved_dataset_preparation_recipe(client):
@@ -3190,11 +3189,8 @@ def test_studio_brand_can_be_configured_for_rainstorm(client, settings):
     assert 'class="brand-mark"' in content
     assert '<strong>RAINSTORM</strong>' in content
     assert 'Pose and behavior research' in content
-    assert ':root{font:16px/1.5 system-ui,sans-serif' in content
-    assert '.app-shell{display:grid;grid-template-columns:240px' in content
-    assert '.app-shell-home{grid-template-columns:minmax(0,1fr)}' in content
+    assert '/experiment-assets/studio.css' in content
     assert 'class="app-shell app-shell-home"' in content
-    assert '.card{padding:24px;background:white' in content
 
     study = Study.objects.create(project=Project.objects.create(name='P'), name='S')
     study_page = client.get(f'/studies/{study.pk}/flow/')
@@ -4505,11 +4501,15 @@ def test_worker_abort_records_failure_context_and_clears_live_batch_eta():
 def test_gpu_hang_card_explains_retry_keeps_the_failed_backend(client):
     from storm_studio.models import Job, Project, Revision, Study
     study = Study.objects.create(project=Project.objects.create(name='P'), name='GPU failure guidance')
-    revision = Revision.objects.create(study=study, kind='plan', payload={'model': 'vame_native', 'config': {'device': 'cuda'}})
+    revision = Revision.objects.create(study=study, kind='plan', payload={
+        'model': 'vame_native', 'config': {'device': 'cuda', 'rnn_backend': 'native'},
+    })
     job = Job.objects.create(revision=revision, status='failed', error='GPU Hang: SIGABRT')
     response = client.get(f'/studies/{study.pk}/jobs/')
-    assert 'Reintentar conserva la configuración' in response.content.decode()
-    assert 'rnn_backend' in response.content.decode()
+    content = response.content.decode()
+    assert 'Esta corrida ya usó' in content
+    assert 'rnn_backend: native' in content
+    assert 'backend alternativo' not in content
     assert f'/jobs/{job.pk}/retry/' not in response.content.decode()
 
 

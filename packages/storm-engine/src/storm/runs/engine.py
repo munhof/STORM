@@ -33,7 +33,15 @@ class RunEngine:
         self.artifacts = artifacts
         self.seeders = tuple(seeders)
 
-    def train(
+    def train(self, *, study_id: str, data_ref: DataRef, dataset: Dataset,
+              spec: RunSpec, metric_names: Sequence[str]) -> RunResult:
+        kwargs = dict(study_id=study_id, data_ref=data_ref, dataset=dataset,
+                      spec=spec, metric_names=metric_names)
+        from storm.experiments import ExperimentExecutor
+        return ExperimentExecutor.run_legacy(lambda: self._train_legacy(**kwargs),
+            semantics='study.same_dataset.legacy')
+
+    def _train_legacy(
         self,
         *,
         study_id: str,

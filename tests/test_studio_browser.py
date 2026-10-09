@@ -338,7 +338,7 @@ def test_codeless_preparation_preview_save_and_model_reuse(live_server, settings
         page.set_default_timeout(5000)
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
-        page.goto(f'{live_server.url}/studies/{study.pk}/prepare/')
+        page.goto(f'{live_server.url}/studies/{study.pk}/prepare/?editor=recipes')
         page.get_by_role('button', name='Agregar: Centrar por media del entrenamiento').click()
         expect(page.locator('#preparation-steps')).to_contain_text(
             'Centrar por media del entrenamiento')
@@ -505,7 +505,7 @@ def test_pose_preparation_is_keyboard_operable_at_mobile_width(live_server, sett
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={'width': 390, 'height': 844})
-        page.goto(f'{live_server.url}/studies/{study.pk}/prepare/')
+        page.goto(f'{live_server.url}/studies/{study.pk}/prepare/?editor=recipes')
         orient = page.get_by_role('button', name='Agregar: Alinear orientación')
         orient.focus()
         orient.press('Enter')

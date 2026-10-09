@@ -1,9 +1,45 @@
 # Componentes reales en STORM Studio
 
+La API de experimentos versionados usa **adaptadores → contexto → pipeline →
+entradas de modelo → estudio/corrida → métricas**. Ver el
+[contrato compartido, tutoriales y límites](../guides/context-experiments.md).
+`Study.from_experiment` y el editor del grafo comparten esa especificación.
+Las secciones siguientes que usan `StudySpec`, `RunSpec` o `suite.steps`
+describen las APIs legacy preservadas; no implican conversión automática al DAG.
+
+
 Esta guía corrige la relación entre el estudio visual y el motor actual de
 STORM. El editor no inventa una plataforma paralela: debe configurar y conectar
 los contratos que ya existen en `storm`, y mostrar claramente qué capacidades
 son propuestas futuras.
+
+## Navegación de Studio
+
+La navegación principal reúne cinco vistas:
+
+- **Experimento:** catálogo agrupado con búsqueda, canvas e inspector. «Ordenar
+  grafo» organiza los nodos por dependencias y modifica solamente el estado visual.
+  «Archivo» reúne el ejemplo tabular, la importación y las exportaciones.
+- **Preparación:** acceso directo al grafo del contexto y a las recetas existentes.
+  La previsualización se ejecuta en el worker sobre una muestra acotada y compara
+  entrada/salida, unidades, máscaras y procedencia. En pose, el frame mostrado se
+  identifica mediante los padres de la ventana, no por su posición central.
+- **Datos:** fuentes, asociaciones, particiones y previsualizaciones. Las tablas
+  extensas se desplazan dentro de su panel; registrar fuentes y cargar benchmarks
+  son acciones desplegables.
+- **Ejecuciones:** veinte corridas por página; cada detalle conserva avisos, logs,
+  errores y acciones. La paginación no elimina historial.
+- **Resultados:** selección de corrida, métricas declaradas y estados por nodo.
+  Los resultados del grafo incluyen distribución de etiquetas, geometría con ejes
+  seleccionables, pose por sesión/frame y video cuando la fuente está vinculada.
+  Se leen artefactos JSON sin deserializar modelos en Studio. Desde aquí se congela una selección y se solicita,
+  por separado, la evaluación del test reservado.
+
+Las herramientas de análisis de planes legacy aparecen al seleccionar una
+corrida legacy. Sus recetas, configuración y modelos permanecen en **Planes
+anteriores**. **Herramientas** reúne historial, trazabilidad y extensiones.
+No se modifican particiones, recetas ni resultados al cambiar la presentación.
+La interfaz se verifica en escritorio a 1920 × 1080 y 2560 × 1440.
 
 ## Qué existe hoy
 
@@ -307,3 +343,31 @@ y `slots`. El plugin aporta el compilador y `config_validator`; la UI sólo edit
 la configuración declarada. El primer caso ejecutable es el VAE de RAINSTORM con
 encoder GRU/LSTM. El editor general de pipeline, topologías arbitrarias y hosts
 científicos adicionales siguen abiertos en ST-08/09/10 y RS-10/11.
+
+## Evidencia visual de experimentos con contexto
+
+El worker guarda `evidence_ref` junto al manifiesto de cada corrida. El artefacto
+JSON conserva predicciones, máscaras, identidades, frames, entradas de referencia,
+embeddings y pérdidas de entrenamiento cuando el modelo los declara. El checksum
+se verifica al leerlo. «Preparar visualizaciones» recupera corridas anteriores
+mediante un trabajo que lee sus artefactos; no entrena ni evalúa test.
+
+Las distribuciones usan todas las predicciones válidas. La geometría muestra hasta
+2.000 observaciones deterministas y permite elegir dimensiones; no aplica PCA o
+UMAP implícitamente. La pose se consulta en bloques de hasta 500 observaciones de
+una misma sesión. Las coordenadas de ventanas necesitan una identidad de referencia
+preservada. Si falta, se informa la limitación y no se inventa una pose.
+
+Las pérdidas de entrenamiento se distinguen de las métricas de validación. Las
+métricas exploratorias requieren referencias válidas y una tarea compatible;
+los estados de agrupamiento no se interpretan como clases de conducta.
+
+Para video se necesitan archivos registrados, correspondencias de sesión/frame y
+fuentes verificables. La pose preparada en centímetros se dibuja por separado de
+la pose original en píxeles. Sin video compatible, las vistas de pose y geometría
+siguen disponibles y Studio explica la fuente faltante.
+
+Los trabajos `experiment_preview` ejecutan sólo antecesores de preparación con
+muestreo declarado; rechazan modelos y evaluación. Necesitan un worker con las
+bibliotecas del plugin y acceso a las rutas referenciadas por el estudio. Las
+muestras completadas se reabren desde Ejecuciones y no cambian el grafo guardado.

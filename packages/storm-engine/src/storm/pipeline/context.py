@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -32,6 +32,18 @@ class StepExecution:
         }
 
 
+@dataclass(frozen=True)
+class ContentDescriptor:
+    """Description of a context value; never its in-memory payload."""
+
+    dtype: str
+    dimensions: tuple[str | int, ...] = ()
+    units: str | None = None
+    granularity: str = "observation"
+    identity: str | None = None
+    time: str | None = None
+
+
 @dataclass
 class PipelineContext:
     """Domain-neutral mutable state shared by pipeline steps."""
@@ -44,6 +56,8 @@ class PipelineContext:
     state: dict[str, Any] = field(default_factory=dict)
     progress_callback: Any = field(default=None, repr=False, compare=False)
     executions: list[StepExecution] = field(default_factory=list)
+
+    schema: dict[str, ContentDescriptor] = field(default_factory=dict)
 
     def get_info(self, name: str, default: Any = None) -> Any:
         """Find a named value in state, artifacts or metadata."""
@@ -62,6 +76,7 @@ class PipelineContext:
             "artifact_keys": sorted(self.artifacts),
             "state_keys": sorted(self.state),
             "executed_steps": len(self.executions),
+            "schema": {key: asdict(value) for key, value in self.schema.items()},
         }
 
 

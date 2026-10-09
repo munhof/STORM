@@ -107,6 +107,13 @@ def test_execution_reports_current_phase_and_checkpoint_epochs(tmp_path):
         'data': {'inputs': [0, 1, 2], 'targets': [2, 4, 9], 'train': [0, 1], 'test': [2]},
     }, tmp_path, 'progress-run', catalog, progress_callback=progress.append)
 
+    store = FileArtifactStore(tmp_path)
+    for epoch in (1, 2):
+        saved = store.resolve(kind='checkpoints', artifact_id=f'progress-run-epoch-{epoch}')
+        assert store.load(saved)['state']['epoch'] == epoch
+    latest = store.resolve(kind='checkpoints', artifact_id='progress-run')
+    assert store.load(latest)['state']['epoch'] == 2
+
     phases = [item['phase'] for item in progress]
     assert phases[0] == 'loading'
     assert 'preparing' in phases

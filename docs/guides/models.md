@@ -1,5 +1,13 @@
 # Modelos compatibles
 
+La API de experimentos versionados usa **adaptadores → contexto → pipeline →
+entradas de modelo → estudio/corrida → métricas**. Ver el
+[contrato compartido, tutoriales y límites](../guides/context-experiments.md).
+`Study.from_experiment` y el editor del grafo comparten esa especificación.
+Las secciones siguientes que usan `StudySpec`, `RunSpec` o `suite.steps`
+describen las APIs legacy preservadas; no implican conversión automática al DAG.
+
+
 ## Contrato mínimo
 
 Un modelo compatible implementa dos métodos:

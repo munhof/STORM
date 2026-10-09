@@ -25,6 +25,7 @@ nav:
       - Plan histórico: planning/studio-roadmap.md
   - Observabilidad: observability.md
   - Guías:
+      - Contextos y experimentos: guides/context-experiments.md
       - Estudios y corridas: guides/studies-and-runs.md
       - Modelos compatibles: guides/models.md
       - Métricas: guides/metrics.md

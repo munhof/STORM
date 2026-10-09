@@ -1,5 +1,13 @@
 # Artefactos y recuperación
 
+La API de experimentos versionados usa **adaptadores → contexto → pipeline →
+entradas de modelo → estudio/corrida → métricas**. Ver el
+[contrato compartido, tutoriales y límites](../guides/context-experiments.md).
+`Study.from_experiment` y el editor del grafo comparten esa especificación.
+Las secciones siguientes que usan `StudySpec`, `RunSpec` o `suite.steps`
+describen las APIs legacy preservadas; no implican conversión automática al DAG.
+
+
 ## Objetivos
 
 La capa de artefactos separa cuatro conceptos:
@@ -177,3 +185,7 @@ El fallo de retención de `progress-run-epoch-1` está registrado en el
 Preflight reconoce preparación materializada sólo cuando el host verifica fuente,
 config resuelta, versiones y fingerprint contra el inventario. Integridad del artefacto
 se vuelve a comprobar al cargarlo; esta metadata no sustituye equivalencia científica.
+
+Los checkpoints de entrenamiento legacy con época positiva se conservan como
+`<execution_id>-epoch-<epoch>`. La referencia `<execution_id>` sigue apuntando al
+último estado para mantener la recuperación existente.

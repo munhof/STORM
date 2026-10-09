@@ -1,5 +1,13 @@
 # Interfaces y contratos
 
+La API de experimentos versionados usa **adaptadores → contexto → pipeline →
+entradas de modelo → estudio/corrida → métricas**. Ver el
+[contrato compartido, tutoriales y límites](../guides/context-experiments.md).
+`Study.from_experiment` y el editor del grafo comparten esa especificación.
+Las secciones siguientes que usan `StudySpec`, `RunSpec` o `suite.steps`
+describen las APIs legacy preservadas; no implican conversión automática al DAG.
+
+
 STORM combina protocolos estructurales con interfaces abstractas. Modelos y
 métricas no necesitan herencia. Pasos y visualizaciones sí heredan de una clase
 base porque el descubrimiento por reflexión necesita una relación nominal que

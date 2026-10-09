@@ -1,0 +1,10 @@
+#context-results section{scroll-margin-top:24px;margin:24px 0}#context-results svg,#context-comparison svg{display:block;width:100%;max-height:400px;background:#fafbfe;border:1px solid #e1e4ee;border-radius:8px}#context-results #result-label-timeline{height:45px}#context-results fieldset{display:flex;gap:16px;flex-wrap:wrap}#context-results input[type=checkbox]{width:auto}#result-frame{width:100%}#context-results .section-tabs{flex-wrap:wrap}#context-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}#context-comparison article{min-width:0}#context-comparison table{font-size:11px}#context-comparison .table-scroll{max-height:240px;overflow:auto}.context-plot-status{color:#647085;font-size:12px}
+/* Keep categorical rows readable instead of shrinking all states into 400px. */
+#context-results .report-chart figure{max-height:420px;overflow:auto;margin:12px 0}
+#context-results .report-chart svg{height:auto;max-height:none;min-width:760px}
+#context-results .state-matrix-scroll{max-height:480px;overflow:auto;border:1px solid #e1e4ee;border-radius:8px}
+#context-results .state-transition-matrix{border-collapse:separate;border-spacing:0;width:max-content}
+#context-results .state-transition-matrix th,#context-results .state-transition-matrix td{min-width:74px;white-space:nowrap;box-sizing:border-box}
+#context-results .state-transition-matrix thead th{position:sticky;top:0;background:#eef1f8;z-index:2}
+#context-results .state-transition-matrix tbody th{position:sticky;left:0;background:#f5f6fa;z-index:1}
+#context-results .state-transition-matrix thead th:first-child{left:0;z-index:3}

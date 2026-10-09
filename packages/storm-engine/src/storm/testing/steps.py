@@ -17,7 +17,7 @@ class IdentityStep(PipelineStep):
 
 
 class ScaleStep(PipelineStep):
-    """Multiply one numeric value or a flat numeric iterable by a factor."""
+    """Multiply numeric values, coordinate vectors or windows by a factor."""
 
     step_type = "scale"
     version = "1"
@@ -36,6 +36,7 @@ def _scale(value: Any, factor: float) -> Any:
     if isinstance(value, (str, bytes)):
         raise TypeError("ScaleStep does not accept text data.")
     try:
-        return [float(item) * factor for item in value]
+        return [_scale(item, factor) if isinstance(item, (list, tuple)) else float(item) * factor
+                for item in value]
     except (TypeError, ValueError) as error:
         raise TypeError("ScaleStep requires numeric data.") from error

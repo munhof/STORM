@@ -1,7 +1,11 @@
 from django.urls import path
-from storm_studio import views
+from storm_studio import views, experiments
 
 urlpatterns = [
+    path('experiment-assets/<str:name>', experiments.asset, name='experiment_asset'),
+    path('studies/<int:study_id>/experiment/', experiments.editor, name='experiment'),
+    path('studies/<int:study_id>/results/', experiments.results, name='results'),
+    path('studies/<int:study_id>/comparisons/', experiments.compare_runs, name='compare-runs'),
     path('', views.home, name='home'),
     path('studies/<int:study_id>/archive/', views.archive_study, name='archive-study'),
     path('preparations/<int:revision_id>/archive/',

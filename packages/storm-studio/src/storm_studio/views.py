@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from django.contrib import messages
 from django.conf import settings
+from django.core.paginator import Paginator
 from django.core.files import File
 from django.db import transaction
 from django.db.models import Q
@@ -331,6 +332,12 @@ def _binary_probability_histogram(result, mask):
             'threshold_x': round(50 + threshold * 600) if threshold is not None else None}
 
 
+def _report_label_key(label):
+    import re
+    return tuple((0, int(part)) if part.isdigit() else (1, part.lower())
+                 for part in re.split(r'(\d+)', label))
+
+
 def _report_visuals(result):
     """Build small, dependency-free SVG chart data for one execution result."""
     from collections import Counter
@@ -364,11 +371,12 @@ def _report_visuals(result):
     else:
         counts = Counter(_prediction_label(value, metadata, capabilities)
                          for value, valid in zip(predictions, mask) if valid)
-        if len(counts) > 30:
+        is_states = 'group' in capabilities or 'state' in str(metadata.get('semantics', '')).lower()
+        if len(counts) > 30 and not is_states:
             top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:29]
             other_count = sum(count for _, count in counts.items()) - sum(
                 count for _, count in top)
-            counts = Counter(top)
+            counts = Counter(dict(top))
             counts['Otras categorías'] = other_count
     state_scope_warning = services.session_local_state_summary(result)
     if state_scope_warning:
@@ -379,7 +387,7 @@ def _report_visuals(result):
          'y': 28 + index * 30,
          'color': _REPORT_PALETTE[index % len(_REPORT_PALETTE)],
          'bar_width': round(360 * count / maximum_count) if maximum_count else 0}
-        for index, (label, count) in enumerate(sorted(counts.items()))
+        for index, (label, count) in enumerate(sorted(counts.items(), key=lambda item: _report_label_key(item[0])))
     ]
     metric_values = []
     for name, value in (result.get('metrics') or {}).items():
@@ -545,7 +553,7 @@ def _state_diagnostics(result):
             current.append(row)
         previous = row
     finish_bout()
-    labels = sorted(set(bouts) | {state for pair in transitions for state in pair})
+    labels = sorted(set(bouts) | {state for pair in transitions for state in pair}, key=_report_label_key)
     colors = {label: _REPORT_PALETTE[index % len(_REPORT_PALETTE)]
               for index, label in enumerate(labels)}
     for bout in bout_rows:
@@ -582,7 +590,7 @@ def _state_diagnostics(result):
     plot_top, plot_height, plot_left, plot_width = 28, 150, 58, 715
     bin_width = plot_width / max(1, len(duration_ranges))
     state_slot = bin_width / max(1, len(labels))
-    bar_width = max(3, min(30, state_slot * 0.68))
+    bar_width = min(30, state_slot * 0.68)
     for bin_index, (low, high) in enumerate(duration_ranges):
         bin_label = str(low) if low == high else f'{low}–{high}'
         bars = []
@@ -1003,6 +1011,8 @@ STAGE_GROUPS = [
 ]
 
 PREPARATION_STEP_UI = {
+    'features.distance': {'label': 'Distancia entre puntos', 'ui': 'distance', 'category': 'features'},
+    'features.window_statistics': {'label': 'Estadísticas por ventana', 'ui': 'statistics', 'category': 'features'},
     'pose.select_coordinates': {'label': 'Elegir coordenadas', 'ui': 'coordinates'},
     'pose.recenter': {'label': 'Centrar en punto corporal', 'ui': 'recenter'},
     'pose.orient_coordinates': {'label': 'Alinear orientación', 'ui': 'orientation'},
@@ -1118,7 +1128,7 @@ def home(request):
         if name:
             project = Project.objects.create(name=name)
             study = Study.objects.create(project=project, name=name)
-            return redirect('page', study.pk, 'flow')
+            return redirect('experiment', study.pk)
     return render(request, 'storm_studio/home.html', {
         'studies': Study.objects.filter(archived_at__isnull=True).order_by('-created'),
         'archived_studies': Study.objects.filter(
@@ -1161,7 +1171,7 @@ def archive_preparation(request, revision_id):
         else:
             ArchivedPreparation.objects.create(preparation=recipe)
             messages.success(request, 'Receta archivada; la revisión y los datasets procesados se conservaron.')
-    return redirect('page', recipe.study_id, 'prepare')
+    return redirect(reverse('page', args=[recipe.study_id, 'prepare']) + '?editor=recipes')
 
 
 @require_http_methods(['GET', 'POST'])
@@ -1169,6 +1179,15 @@ def page(request, study_id, section):
     study = get_object_or_404(Study, pk=study_id)
     if section not in dict(PAGES):
         raise Http404
+    if (section == 'prepare' and request.method == 'GET'
+            and request.GET.get('editor') != 'recipes'
+            and not any(key in request.GET for key in ('recipe_revision', 'required_step', 'required_model', 'snapshot'))):
+        return redirect(reverse('experiment', args=[study.pk]) + '?mode=prepare')
+    if section == 'evidence':
+        candidates = Job.objects.filter(revision__study=study, status='completed').order_by('-created')
+        candidate = (candidates.filter(pk=request.GET['job']).first() if request.GET.get('job') else candidates.first())
+        if candidate and candidate.operation in {'experiment', 'experiment_test'}:
+            return redirect(reverse('results', args=[study.pk]) + '?job=' + str(candidate.pk))
     ui_catalog = services.catalog()
     recipe_presets = list(ui_catalog.recipe_presets.values())
     latest = services.active_plan(study)
@@ -1331,7 +1350,7 @@ def page(request, study_id, section):
                         study=study, kind='preparation', parent=parent_preparation,
                         payload=payload)
                     messages.success(request, f'Receta guardada como revisión {revision.pk}.')
-                    return redirect('page', study.pk, 'prepare')
+                    return redirect(reverse('page', args=[study.pk, 'prepare']) + '?editor=recipes')
             else:
                 preparation_id = payload.get('preparation_revision_id')
                 if preparation_id:
@@ -1402,9 +1421,9 @@ def page(request, study_id, section):
             DatasetRevision.objects.filter(pk=dataset_revision.pk).update(status='interrupted')
             dataset_revision.refresh_from_db()
     model_jobs = [job for job in jobs
-                  if job.operation not in {'inventory', 'prepare', 'video_preview'}]
+                  if job.operation not in {'inventory', 'prepare', 'video_preview', 'experiment_evidence', 'experiment_preview', 'experiment', 'experiment_test'}]
     completed = [job for job in model_jobs if job.status == 'completed']
-    execution_summary = _execution_summary(jobs, len(completed))
+    execution_summary = _execution_summary(jobs, sum(job.status == 'completed' and job.operation not in {'inventory', 'prepare', 'video_preview', 'experiment_evidence', 'experiment_preview'} for job in jobs))
     for job in completed:
         connector = job.result.get('spec', {}).get('connector', 'numeric_json')
         job.inference_dataset_revisions = [
@@ -1777,7 +1796,9 @@ def page(request, study_id, section):
     return render(request, 'storm_studio/study.html', {
         'study': study, 'section': section, 'title': dict(PAGES)[section],
         'advanced_pages': ADVANCED_PAGES,
+        'scientific_revision': study.revision_set.filter(kind__in=['experiment', 'plan']).order_by('-pk').first(),
         'form': form, 'latest': latest, 'jobs': jobs, 'completed': completed,
+        'jobs_page': Paginator(jobs, 20).get_page(request.GET.get('page')),
         'execution_summary': execution_summary,
         'recipe_presets': recipe_presets,
         'selected_recipe_preset': selected_preset,
@@ -1802,6 +1823,8 @@ def page(request, study_id, section):
         'derived_dataset_revisions': derived_dataset_revisions,
         'inspected_prepared_dataset': inspected_prepared_dataset,
         'preparation_step_catalog': preparation_step_catalog(),
+        'preparation_feature_catalog': {str(item.pk): item.inventory.get('feature_names', [])
+                                        for item in dataset_revisions},
         'dataset_feature_names': (dataset_revision.inventory.get('feature_names', [])
                                   if dataset_revision else []),
         'pose_coordinate_parts': pose_coordinate_parts,
@@ -2388,7 +2411,7 @@ def aggregate_report(request, study_id, format):
         visual_runs = []
         comparable_visual_jobs = []
         for job in jobs:
-            if job.operation in {'inventory', 'prepare', 'video_preview'}:
+            if job.operation in {'inventory', 'prepare', 'video_preview', 'experiment_evidence', 'experiment_preview'}:
                 continue
             result = services.load_execution_result(job)
             visuals = _report_visuals(result)
@@ -2541,12 +2564,16 @@ def frozen_study_bundle(request, revision_id):
 
 def status(request, study_id):
     get_object_or_404(Study, pk=study_id)
+    if request.GET.get('summary') == '1':
+        jobs = list(Job.objects.filter(revision__study_id=study_id).only('status', 'operation'))
+        completed = sum(job.status == 'completed' and job.operation not in {'inventory', 'prepare', 'video_preview', 'experiment_evidence', 'experiment_preview'} for job in jobs)
+        return JsonResponse({'summary': _execution_summary(jobs, completed)})
     jobs = list(Job.objects.filter(revision__study_id=study_id)
                 .select_related('revision').order_by('-created'))
     _decorate_execution_progress(jobs)
     completed_count = sum(
         job.status == 'completed'
-        and job.operation not in {'inventory', 'prepare', 'video_preview'}
+        and job.operation not in {'inventory', 'prepare', 'video_preview', 'experiment_evidence', 'experiment_preview'}
         for job in jobs)
     return JsonResponse({
         'summary': _execution_summary(jobs, completed_count),

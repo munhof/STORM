@@ -1,3 +1,4 @@
+{% load l10n %}
 <dl class="report-summary" aria-label="Cobertura de la corrida">
   <div><dt>Predicciones válidas en esta corrida</dt><dd>{{ report_visuals.valid_prediction_count }} / {{ report_visuals.prediction_scope_count }}</dd></div>
   <div><dt>Cobertura de inferencia en esta corrida</dt><dd>{{ report_visuals.prediction_coverage }}%</dd></div>
@@ -10,14 +11,15 @@
 {% if report_visuals.predictions %}
 <section class="report-chart" aria-labelledby="{{ prediction_title_id }}">
   <h3 id="{{ prediction_title_id }}">{{ report_visuals.distribution_title }}</h3>
-  <figure>
-    <svg id="{{ prediction_chart_id }}" viewBox="0 0 760 {{ report_visuals.prediction_height }}" role="img" aria-label="{{ report_visuals.distribution_title }} por categoría">
+  {% if report_visuals.predictions|length > 12 %}<p class="muted">{{ report_visuals.predictions|length }} categorías. Desplazá el gráfico hacia abajo para recorrerlas; la tabla incluye todos los valores mostrados.</p>{% endif %}
+  <figure tabindex="0" aria-label="Distribución por categoría, desplazable">
+    {% localize off %}<svg id="{{ prediction_chart_id }}" viewBox="0 0 760 {{ report_visuals.prediction_height }}" role="img" aria-label="{{ report_visuals.distribution_title }} por categoría">
       {% for row in report_visuals.predictions %}
       <text x="8" y="{{ row.y|add:'5' }}" font-size="13">{{ row.label }}</text>
       <rect x="300" y="{{ row.y|add:'-9' }}" width="{{ row.bar_width }}" height="17" rx="4" fill="{{ row.color }}"><title>{{ row.label }}: {{ row.count }} observaciones</title></rect>
       <text x="{{ row.bar_width|add:'310' }}" y="{{ row.y|add:'5' }}" font-size="13">{{ row.count }}</text>
       {% endfor %}
-    </svg>
+    </svg>{% endlocalize %}
   </figure>
   <details><summary>Ver tabla de frecuencias por categoría</summary><table><caption>Valores de la distribución</caption><thead><tr><th>Categoría</th><th>Observaciones</th></tr></thead><tbody>
     {% for row in report_visuals.predictions %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>{% endfor %}
@@ -31,11 +33,11 @@
 <p>Probabilidad de {{ report_visuals.probability_histogram.meaning }} · {{ report_visuals.probability_histogram.count }} observaciones válidas · media {{ report_visuals.probability_histogram.mean }}{% if report_visuals.probability_histogram.threshold != None %} · umbral de clasificación {{ report_visuals.probability_histogram.threshold }}{% endif %}.</p>
 <p class="muted">Esta distribución describe la salida del modelo. Para evaluar su precisión se necesita una referencia compatible y una correspondencia de tareas registrada.</p>
 {% if report_visuals.probability_histogram.invalid_count %}<p role="status">Se excluyeron {{ report_visuals.probability_histogram.invalid_count }} probabilidades inválidas.</p>{% endif %}
-<figure><svg viewBox="0 0 700 215" role="img" aria-label="Histograma de probabilidades entre cero y uno">
+<figure>{% localize off %}<svg viewBox="0 0 700 215" role="img" aria-label="Histograma de probabilidades entre cero y uno">
 <line x1="50" y1="170" x2="650" y2="170" stroke="#60748a" />
 {% for bin in report_visuals.probability_histogram.bins %}<rect x="{{ bin.x }}" y="{{ bin.y }}" width="54" height="{{ bin.height }}" fill="#1754ad"><title>{{ bin.label }}: {{ bin.count }} observaciones</title></rect><text x="{{ bin.text_x }}" y="190" font-size="10" text-anchor="middle">{{ bin.label }}</text>{% endfor %}
 {% if report_visuals.probability_histogram.threshold_x != None %}<line x1="{{ report_visuals.probability_histogram.threshold_x }}" x2="{{ report_visuals.probability_histogram.threshold_x }}" y1="10" y2="170" stroke="#a32929" stroke-dasharray="4 3"><title>Umbral {{ report_visuals.probability_histogram.threshold }}</title></line>{% endif %}
-</svg></figure>
+</svg>{% endlocalize %}</figure>
 <details><summary>Ver tabla de probabilidades agrupadas</summary><table><caption>Intervalos de probabilidad: límite inferior incluido; el último incluye 1.</caption><thead><tr><th>Probabilidad</th><th>Observaciones</th></tr></thead><tbody>{% for bin in report_visuals.probability_histogram.bins %}<tr><td>{{ bin.label }}</td><td>{{ bin.count }}</td></tr>{% endfor %}</tbody></table></details>
 </section>
 {% endif %}
@@ -43,13 +45,13 @@
 <section class="report-chart" aria-labelledby="{{ metric_title_id }}">
   <h3 id="{{ metric_title_id }}">Métricas</h3>
   <figure>
-    <svg id="{{ metric_chart_id }}" viewBox="0 0 760 {{ report_visuals.metric_height }}" role="img" aria-label="Métricas de la ejecución">
+    {% localize off %}<svg id="{{ metric_chart_id }}" viewBox="0 0 760 {{ report_visuals.metric_height }}" role="img" aria-label="Métricas de la ejecución">
       {% for row in report_visuals.metrics %}
       <text x="8" y="{{ row.y|add:'5' }}" font-size="13">{{ row.name }}</text>
       <rect x="180" y="{{ row.y|add:'-9' }}" width="{{ row.bar_width }}" height="17" rx="4" fill="{{ row.color }}"><title>{{ row.name }}: {{ row.value }} · {{ row.direction }}</title></rect>
       <text x="{{ row.bar_width|add:'190' }}" y="{{ row.y|add:'5' }}" font-size="13">{{ row.value }}</text>
       {% endfor %}
-    </svg>
+    </svg>{% endlocalize %}
   </figure>
   <details><summary>Ver tabla de valores de métricas</summary><table><caption>Valores y dirección declarada</caption><thead><tr><th>Métrica</th><th>Valor</th><th>Dirección</th></tr></thead><tbody>
     {% for row in report_visuals.metrics %}<tr><td>{{ row.name }}</td><td>{{ row.value }}</td><td>{{ row.direction }}</td></tr>{% endfor %}
@@ -64,7 +66,7 @@
   <div class="state-chart-legend" aria-label="Estados y colores del histograma">
     {% for state in report_visuals.state_duration_histogram.states %}<span><i style="background:{{ state.color }}"></i>{{ state.label }}</span>{% endfor %}
   </div>
-  <figure><svg id="state-duration-histogram" viewBox="0 0 800 {{ report_visuals.state_duration_histogram.height }}" role="img" aria-label="Histograma de duración de episodios por estado">
+  <figure>{% localize off %}<svg id="state-duration-histogram" viewBox="0 0 800 {{ report_visuals.state_duration_histogram.height }}" role="img" aria-label="Histograma de duración de episodios por estado">
     <line x1="52" y1="{{ report_visuals.state_duration_histogram.plot_top }}" x2="52" y2="{{ report_visuals.state_duration_histogram.plot_bottom }}" stroke="#60748a" />
     <line x1="52" y1="{{ report_visuals.state_duration_histogram.plot_bottom }}" x2="790" y2="{{ report_visuals.state_duration_histogram.plot_bottom }}" stroke="#60748a" />
     <text x="8" y="{{ report_visuals.state_duration_histogram.plot_top|add:'5' }}" font-size="12">{{ report_visuals.state_duration_histogram.max_count }}</text>
@@ -75,7 +77,7 @@
       <text x="{{ bin.x }}" y="{{ report_visuals.state_duration_histogram.plot_bottom|add:'20' }}" text-anchor="middle" font-size="11">{{ bin.label }}</text>
     {% endfor %}
     <text x="400" y="232" text-anchor="middle" font-size="12">Duración del episodio · frames consecutivos</text>
-  </svg></figure>
+  </svg>{% endlocalize %}</figure>
   <details><summary>Ver tabla de frecuencias del histograma</summary><div class="table-scroll"><table><caption>Episodios por intervalo y estado</caption><thead><tr><th>Duración (frames)</th>{% for state in report_visuals.state_duration_histogram.states %}<th>{{ state.label }}</th>{% endfor %}</tr></thead><tbody>{% for bin in report_visuals.state_duration_histogram.bins %}<tr><th scope="row">{{ bin.label }}</th>{% for bar in bin.bars %}<td>{{ bar.count }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></details>
   <details><summary>Ver tabla de valores por episodio</summary><p>Se muestran hasta 1.000 episodios; total detectado: {{ report_visuals.state_bout_count }}.{% if report_visuals.state_bouts_truncated %} La tabla está limitada para mantener ágil el reporte; descargá los datos de predicción para consultar el resto.{% endif %}</p><div class="table-scroll"><table id="state-bouts-table"><caption>Duración de cada episodio detectado</caption><thead><tr><th>Episodio</th><th>Estado</th><th>Sesión</th><th>Segmento</th><th>Frame inicial</th><th>Frame final</th><th>Duración</th></tr></thead><tbody>{% for row in report_visuals.state_bouts %}<tr><td>{{ row.episode }}</td><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th><td>{{ row.session }}</td><td>{{ row.segment }}</td><td>{{ row.start_frame }}</td><td>{{ row.end_frame }}</td><td>{{ row.frames }} frames</td></tr>{% endfor %}</tbody></table></div></details>
   <details><summary>Ver resumen por estado</summary><div class="table-scroll"><table><caption>Ocupación y duración resumidas</caption><thead><tr><th>Estado</th><th>Episodios</th><th>Frames ocupados</th><th>Ocupación</th><th>Duración media</th><th>Mínimo</th><th>Máximo</th></tr></thead><tbody>{% for row in report_visuals.state_durations %}<tr><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th><td>{{ row.bouts }}</td><td>{{ row.total_frames }}</td><td>{{ row.share_percent }}%</td><td>{{ row.mean_frames }}</td><td>{{ row.min_frames }}</td><td>{{ row.max_frames }}</td></tr>{% endfor %}</tbody></table></div></details>
@@ -85,7 +87,7 @@
   <h3 id="state-transition-title">Transiciones entre estados</h3>
   <p>La fila indica el estado de origen y la columna el destino. El tono más intenso señala más transiciones. Solo se cuentan frames consecutivos del mismo segmento.</p>
   <div class="state-chart-legend" aria-label="Colores del estado de origen">{% for row in report_visuals.state_transition_matrix.rows %}<span><i style="background:{{ row.color }}"></i>{{ row.label }}</span>{% endfor %}</div>
-  <div class="table-scroll"><table class="state-transition-matrix" id="state-transition-matrix"><caption>Frecuencia de transiciones · origen por destino</caption><thead><tr><th scope="col">Desde ↓ / hacia →</th>{% for label in report_visuals.state_transition_matrix.labels %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead><tbody>{% for row in report_visuals.state_transition_matrix.rows %}<tr><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th>{% for cell in row.cells %}<td style="background-color:{{ cell.background }};color:{{ cell.text_color }}" title="{{ row.label }} → {{ cell.target }}: {{ cell.count }}">{{ cell.count }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+  <div class="table-scroll state-matrix-scroll" tabindex="0" aria-label="Matriz de transiciones desplazable"><table class="state-transition-matrix" id="state-transition-matrix"><caption>Frecuencia de transiciones · origen por destino</caption><thead><tr><th scope="col">Desde ↓ / hacia →</th>{% for label in report_visuals.state_transition_matrix.labels %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead><tbody>{% for row in report_visuals.state_transition_matrix.rows %}<tr><th scope="row"><span class="state-color-dot" style="background:{{ row.color }}"></span>{{ row.label }}</th>{% for cell in row.cells %}<td style="background-color:{{ cell.background }};color:{{ cell.text_color }}" title="{{ row.label }} → {{ cell.target }}: {{ cell.count }}">{{ cell.count }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
   <details><summary>Ver recuentos exactos de transiciones</summary><table><caption>Transiciones observadas</caption><thead><tr><th>Desde</th><th>Hacia</th><th>Transiciones</th></tr></thead><tbody>{% for row in report_visuals.state_transitions %}<tr><th scope="row">{{ row.from }}</th><td>{{ row.to }}</td><td>{{ row.count }}</td></tr>{% empty %}<tr><td colspan="3">No se observaron cambios entre estados.</td></tr>{% endfor %}</tbody></table></details>
 </section>{% endif %}
 <style>.state-chart-legend{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0}.state-chart-legend span{display:inline-flex;align-items:center;gap:6px}.state-chart-legend i,.state-color-dot{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:6px}.state-transition-matrix{width:auto;min-width:520px}.state-transition-matrix th,.state-transition-matrix td{text-align:center;min-width:74px}.state-transition-matrix tbody th{text-align:left}</style>

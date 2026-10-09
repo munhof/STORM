@@ -403,7 +403,20 @@ def perform(job_id):
         'stage_total': 4 if job.operation in ('infer', 'apply') else 5,
     })
     try:
-        if job.operation == 'inventory':
+        if job.operation == 'experiment_preview':
+            from storm_studio.experiments import perform_preview
+            result = perform_preview(job)
+        elif job.operation == 'experiment_evidence':
+            from storm_studio.context_evidence import recover_evidence
+            source = Job.objects.get(pk=job.revision.payload['job'], revision__study=job.revision.study)
+            result = {'evidence_ref': recover_evidence(source)}
+        elif job.operation == 'experiment_test':
+            from storm_studio.experiments import perform_reserved
+            result = perform_reserved(job)
+        elif job.operation == 'experiment':
+            from storm_studio.experiments import perform_experiment
+            result = perform_experiment(job)
+        elif job.operation == 'inventory':
             from storm_studio.dataset_inventory import inspect_dataset
 
             _record_progress(job_id, {
@@ -538,7 +551,8 @@ def perform(job_id):
         final_progress = Job.objects.only('progress').get(pk=job_id).progress
         persisted_result = _result_for_database(job_id, result)
         Job.objects.filter(pk=job_id, status='running').update(
-            status='completed', result=persisted_result,
+            status=(result['status'] if job.operation == 'experiment'
+                    and result.get('status') in ('partial', 'failed') else 'completed'), result=persisted_result,
             progress=final_progress, finished=finished)
     except Exception as error:
         logger.exception('Background job %s failed', job_id)

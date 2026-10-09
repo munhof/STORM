@@ -47,6 +47,9 @@ class Catalog:
             'json_records': lambda data: data,
             'prepared_artifact': lambda data: data,
         }
+        self.data_adapters = {}
+        self.model_adapters = {}
+        self.experiment_nodes = []
         self.preparation_resolver = None
         self.seeders = []
         self.recipe_presets = {}
@@ -220,6 +223,9 @@ class ConstrainedGroups:
 def default_catalog():
     catalog = Catalog()
     catalog.steps.discover('storm.testing.steps')
+    from storm.feature_nodes import DistanceFeatureStep, WindowStatisticsStep
+    catalog.steps.register(DistanceFeatureStep)
+    catalog.steps.register(WindowStatisticsStep)
     catalog.visualizations.discover('storm.visualization.classic')
     register_classic_metrics(catalog.metrics)
     for name, builder, props in [
@@ -340,7 +346,7 @@ def transform(values, steps, learned=None, catalog=None, trace=None):
 def transform_aligned(values, observation_indices, steps, learned=None, catalog=None, trace=None,
                       context_metadata=None, stage_trace=None,
                       fit_observation_indices=None, progress_callback=None,
-                      checkpoint_callback=None, resume_state=None):
+                      checkpoint_callback=None, resume_state=None, pipeline_context=None):
     """Prepare values while preserving an explicit mapping to source observations.
 
     A step that filters or reorders values must update
@@ -363,6 +369,8 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
     current_metadata = dict(original_metadata)
     for key in original_metadata.keys() - static_keys:
         current_metadata[key] = [original_metadata[key][index] for index in source_indices]
+    context = pipeline_context if pipeline_context is not None else PipelineContext()
+    context.progress_callback = progress_callback
     initial_indices = list(source_indices)
     completed_steps = 0
     completed_trace = []
@@ -380,6 +388,8 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
         fitted = list(resume_state['fitted'])
         current_metadata = dict(resume_state['metadata'])
         completed_trace = list(resume_state['stage_trace'])
+        for key, value in resume_state.get('context', {}).items():
+            setattr(context, key, deepcopy(value))
         if (len(output) != len(source_indices) or len(set(source_indices)) != len(source_indices)
                 or not set(source_indices).issubset(initial_indices)
                 or len(fitted) != completed_steps or len(completed_trace) != completed_steps):
@@ -426,9 +436,15 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
                 raise ValueError('Unsupported step')
             plugin = catalog.steps.build(step['type'], step.get('config', {}))
             value = step.get('config', {})
-        step_metadata = {'observation_indices': list(source_indices), **current_metadata}
-        context = PipelineRunner([plugin]).run(PipelineContext(
-            data=output, metadata=step_metadata, progress_callback=progress_callback))
+        context.data = output
+        context.metadata.update(current_metadata)
+        context.metadata['observation_indices'] = list(source_indices)
+        previous_targets = context.targets
+        previous_target_values = deepcopy(previous_targets)
+        execution_start = len(context.executions)
+        updated = PipelineRunner([plugin]).run(context)
+        if updated is not context:
+            context.__dict__.update(updated.__dict__)
         if progress_callback is not None:
             progress_callback({'label': f"Validando alineación del paso {position + 1} de {len(steps)}: {step['type']}",
                                'phase_step': position, 'phase_total': len(steps),
@@ -443,6 +459,12 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
             raise ValueError('Invalid observation_indices declared by pipeline step')
         if len(output) != len(source_indices) and mapped == source_indices:
             raise ValueError('A step that changes observations must declare observation_indices')
+        if context.targets is previous_targets and previous_target_values is not None:
+            if len(previous_target_values) == len(source_indices) and mapped != source_indices:
+                positions = {index: i for i, index in enumerate(source_indices)}
+                context.targets = [previous_target_values[positions[index]] for index in mapped]
+        if context.targets is not None and len(context.targets) != len(output):
+            raise ValueError('Pipeline targets must align with output observations')
         source_indices = mapped
         next_metadata = {
             key: value for key, value in context.metadata.items()
@@ -459,7 +481,7 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
                 next_metadata[key] = [original_rows[index] for index in source_indices]
         current_metadata = next_metadata
         if trace is not None:
-            trace.extend(dict(item.to_dict(), index=position) for item in context.executions)
+            trace.extend(dict(item.to_dict(), index=position) for item in context.executions[execution_start:])
         if stage_trace is not None or checkpoint_callback is not None:
             row = {
                 'type': step['type'],
@@ -479,7 +501,9 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
                 'fit_indices': fit_observation_indices, 'learned': learned,
                 'completed_steps': position + 1, 'inputs': output,
                 'selected': source_indices, 'fitted': list(fitted),
-                'metadata': current_metadata, 'stage_trace': list(completed_trace),
+                'metadata': deepcopy(current_metadata), 'stage_trace': deepcopy(completed_trace),
+                'context': deepcopy({key: getattr(context, key) for key in
+                    ('targets', 'state', 'artifacts', 'dataset_id', 'metadata', 'schema', 'executions')}),
             })
         if progress_callback is not None:
             progress_callback({
@@ -487,6 +511,9 @@ def transform_aligned(values, observation_indices, steps, learned=None, catalog=
                 'phase_step': position + 1, 'phase_total': len(steps),
                 'unit_label': 'pasos de preparación',
             })
+    context.data = output
+    context.metadata.update(current_metadata)
+    context.metadata['observation_indices'] = list(source_indices)
     return output, fitted, source_indices
 
 
@@ -504,6 +531,18 @@ def missing_required_pipeline_steps(model_name, steps, catalog=None):
 
 
 def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
+            resume_from=None, resume_config=None, inference_from=None,
+            progress_callback=None):
+    options = dict(update_from=update_from, resume_from=resume_from,
+                   resume_config=resume_config, inference_from=inference_from,
+                   progress_callback=progress_callback)
+    from storm.experiments import ExperimentExecutor
+    return ExperimentExecutor.run_legacy(
+        lambda: _execute_legacy(spec, store_root, execution_id, catalog, **options),
+        semantics='suite.partitioned.legacy')
+
+
+def _execute_legacy(spec, store_root, execution_id, catalog=None, *, update_from=None,
             resume_from=None, resume_config=None, inference_from=None,
             progress_callback=None):
     def report_progress(phase, label, stage_index, *, phase_step=None, phase_total=None,
@@ -698,6 +737,15 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
                     "taxonomy", "likelihood_bodyparts")
         if key in data
     }
+    def make_context(indices):
+        return PipelineContext(targets=None if targets is None else [targets[i] for i in indices],
+                               state={'legacy_data': data})
+    training_context = make_context(train)
+    evaluation_context = make_context(evaluation_indices)
+    def bind_context(context):
+        method = getattr(model, 'bind_context', None)
+        if callable(method):
+            method(context)
     if operation == 'infer':
         if 'infer' not in descriptor.capabilities:
             raise ValueError('Model cannot infer')
@@ -707,10 +755,12 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         evaluation, fitted, selected = transform_aligned(
             [inputs[i] for i in evaluation_indices], evaluation_indices, spec.get('steps', []),
             previous_steps, catalog, evaluation_trace, context_metadata=aligned_metadata,
-            progress_callback=pipeline_progress('preparing', 2))
+            progress_callback=pipeline_progress('preparing', 2),
+            pipeline_context=evaluation_context)
         report_progress(
             'predicting', 'Calculando predicciones', 3,
             phase_step=0, phase_total=len(evaluation), unit_label='observaciones')
+        bind_context(evaluation_context)
         predict_with_context = getattr(model, 'predict_with_context', None)
         if callable(predict_with_context):
             output = predict_with_context(evaluation, data, selected)
@@ -720,7 +770,9 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         prepared, fitted, prepared_train_indices = transform_aligned(
             [inputs[i] for i in train], train, spec.get('steps', []), previous_steps,
             catalog=catalog, trace=training_trace, context_metadata=aligned_metadata,
-            progress_callback=pipeline_progress('preparing', 2))
+            progress_callback=pipeline_progress('preparing', 2),
+            pipeline_context=training_context)
+        bind_context(training_context)
         total_epochs = spec.get('config', {}).get('epochs')
         if type(total_epochs) is not int or total_epochs < 1:
             total_epochs = None
@@ -732,13 +784,17 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         )
 
         def save_checkpoint(state):
-            store.save(kind='checkpoints', artifact_id=execution_id, value={
+            value = {
                 'state': state, 'fingerprint': fingerprint(spec), 'model_version': descriptor.version,
                 'data_fingerprint': data_fingerprint,
                 'component_identity': snapshot['identity_fingerprint'],
-                'fitted_steps': fitted, 'source_execution': execution_id},
-                metadata={'execution_id': execution_id})
+                'fitted_steps': fitted, 'source_execution': execution_id}
             epoch = state.get('epoch') if isinstance(state, dict) else None
+            if type(epoch) is int and epoch > 0:
+                store.save(kind='checkpoints', artifact_id=f'{execution_id}-epoch-{epoch}',
+                    value=value, metadata={'execution_id': execution_id, 'epoch': epoch})
+            store.save(kind='checkpoints', artifact_id=execution_id, value=value,
+                metadata={'execution_id': execution_id})
             state_config = state.get('training_config', {}) if isinstance(state, dict) else {}
             epochs = state_config.get('epochs', total_epochs)
             if type(epoch) is int and type(epochs) is int and epochs > 0:
@@ -766,7 +822,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         else:
             if 'train' not in descriptor.capabilities:
                 raise ValueError('Model cannot train')
-            train_targets = None if targets is None else [targets[i] for i in prepared_train_indices]
+            train_targets = training_context.targets
             if update_from is not None:
                 model.partial_fit(prepared, train_targets)
             elif 'checkpoint' in descriptor.capabilities:
@@ -776,7 +832,9 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
             evaluation, _, selected = transform_aligned(
                 [inputs[i] for i in evaluation_indices], evaluation_indices, spec.get('steps', []),
                 fitted, catalog, evaluation_trace, context_metadata=aligned_metadata,
-                progress_callback=pipeline_progress('evaluating', 4))
+                progress_callback=pipeline_progress('evaluating', 4),
+                pipeline_context=evaluation_context)
+            bind_context(evaluation_context)
             report_progress(
                 'evaluating', 'Evaluando las predicciones', 4,
                 phase_step=0, phase_total=len(evaluation), unit_label='observaciones')
@@ -810,9 +868,16 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
                    output.metadata.get('task'))
     if output_task is None and not requested_metrics:
         output_task = 'regression'
-    metric_targets = targets
+    metric_context = training_context if is_group_model and operation != 'infer' else evaluation_context
+    metric_targets = None
+    if metric_context.targets is not None:
+        if len(metric_context.targets) != len(selected):
+            raise ValueError('Context targets must align with selected output observations')
+        metric_targets = list(targets) if targets is not None else [None] * len(inputs)
+        for index, target in zip(selected, metric_context.targets):
+            metric_targets[index] = target
     metric_reason = None
-    if output.metadata.get('task') == 'binary_classification' and targets is not None:
+    if output.metadata.get('task') == 'binary_classification' and metric_targets is not None:
         taxonomy = data.get('taxonomy')
         mapping = output.metadata.get('category_mapping')
         mapping_version = output.metadata.get('category_mapping_version')
@@ -823,13 +888,13 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
             and mapping == {'0': taxonomy[0], '1': taxonomy[1]}
             and isinstance(mapping_version, str) and bool(mapping_version.strip())
         )
-        normalized_targets = list(targets)
+        normalized_targets = list(metric_targets)
         valid_binary_values = valid_taxonomy
         if valid_binary_values:
             for position, index in enumerate(selected):
                 if index not in metric_indices:
                     continue
-                target = targets[index]
+                target = metric_targets[index]
                 prediction = output.predictions[position]
                 if (isinstance(target, (int, float)) and not isinstance(target, bool)
                         and target in (0, 1)):
@@ -852,7 +917,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         else:
             metric_targets = normalized_targets
     metric_names = []
-    if targets is not None:
+    if metric_targets is not None:
         if requested_metrics:
             candidates = requested_metrics
         elif output_task == 'invalid_classification_mapping':
@@ -898,7 +963,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
             'Las métricas VAME contra etiquetas humanas se calculan al inferir con el '
             'modelo guardado, no sobre sus grupos de entrenamiento.')
     metrics = {}
-    if targets is not None:
+    if metric_targets is not None:
         if metric_indices:
             selected_positions = [selected.index(index) for index in metric_indices]
             evaluation_dataset = Dataset([inputs[i] for i in metric_indices],
@@ -911,7 +976,7 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
                 dataset=evaluation_dataset, output=metric_output, model=model))
                 for name in metric_names}
     if metric_reason is None:
-        if targets is None:
+        if metric_targets is None:
             metric_reason = 'Esta revisión no tiene etiquetas de referencia para calcular métricas.'
         elif not metric_indices:
             metric_reason = 'No quedaron predicciones y etiquetas válidas en la máscara de evaluación.'
@@ -924,11 +989,11 @@ def execute(spec, store_root, execution_id, catalog=None, *, update_from=None,
         phase_step=0, phase_total=artifact_total, unit_label='artefactos')
     if is_group_model and not metric_names:
         evaluation_status = 'inspection_only_no_group_metric'
-    elif targets is None:
+    elif metric_targets is None:
         evaluation_status = 'inspection_only_no_reference'
-    elif targets is not None and metric_indices and not metric_names:
+    elif metric_targets is not None and metric_indices and not metric_names:
         evaluation_status = 'metrics_not_requested'
-    elif targets is not None and not metric_indices:
+    elif metric_targets is not None and not metric_indices:
         evaluation_status = (
             'inspection_only_no_valid_predictions'
             if any(evaluation_mask[index] for index in selected)

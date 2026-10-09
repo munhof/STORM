@@ -35,7 +35,21 @@ class Study:
             seeders=seeders,
         )
 
-    def run(self) -> StudyResults:
+    @classmethod
+    def from_experiment(cls, specification, *, catalog=None):
+        from copy import deepcopy
+        from storm.experiment_nodes import experiment_registry
+        from storm.experiments import expand_study
+        instance = cls.__new__(cls)
+        instance.experiment = deepcopy(specification)
+        instance.registry = experiment_registry(catalog)
+        expand_study(instance.experiment, instance.registry)
+        return instance
+
+    def run(self) -> StudyResults | list[dict]:
+        if hasattr(self, 'experiment'):
+            from storm.experiment_nodes import run_study
+            return run_study(self.experiment, self.registry)
         dataset = self.data_loader(self.spec.data)
         if not isinstance(dataset, Dataset):
             raise TypeError("data_loader must return Dataset.")
